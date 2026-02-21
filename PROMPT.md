@@ -25,7 +25,7 @@ Claude AI:
   - Checks context: purchases exist today? → reuse weather/pescheria
   - Validates: all required data present
   - Decides: action=acquisto with complete data
-Code: executeAcquisto(data) // just writes to Sheet
+Code: executePurchase(data) // just writes to Sheet
 ```
 ✅ Flexible - understands natural language
 ✅ Easy to maintain - logic in prompt
@@ -262,13 +262,13 @@ User Message
     ↓
 ┌─────────────────────────────────────┐
 │ Simple Executor Function            │
-│ - executeAcquisto()                 │
-│ - executeRimanenze()                │
-│ - executeVenditaRistoranti()        │
-│ - executeEccesso()                  │
-│ - executeAggiornamento()            │
-│ - executeCancellazione()            │
-│ - executeCancellazioneMultipla()    │
+│ - executePurchase()                 │
+│ - executeRemainders()               │
+│ - executeRestaurantSale()           │
+│ - executeExcess()                   │
+│ - executeUpdate()                   │
+│ - executeDeletion()                 │
+│ - executeBulkDeletion()             │
 └─────────────────────────────────────┘
     ↓
 Google Sheets Updated

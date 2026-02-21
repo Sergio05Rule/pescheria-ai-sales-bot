@@ -6,20 +6,20 @@
 // ============================================================
 
 // ── Master Data (extracted from historical data) ────────────
-const CATEGORIE = ['Allevamento', 'Mare', 'Decongelato', 'Congelato'];
-const FORNITORI = ['Brezza', 'Franco', 'Meridional', 'Ottavio', 'Pinuccio', 'Rimanenza'];
-const PESCHERIE = ['Grassano', 'Grottole'];
-const RISTORANTI = ['Brigante'];
-const METEO = ['Sole', 'Nuvoloso', 'Pioggia', 'Neve'];
+const CATEGORIES = ['Allevamento', 'Mare', 'Decongelato', 'Congelato'];
+const SUPPLIERS = ['Brezza', 'Franco', 'Meridional', 'Ottavio', 'Pinuccio', 'Rimanenza'];
+const FISH_SHOPS = ['Grassano', 'Grottole'];
+const RESTAURANTS = ['Brigante'];
+const WEATHER = ['Sole', 'Nuvoloso', 'Pioggia', 'Neve'];
 
 // Fixed waste per kg (only these two have non-zero values)
-const SCARTO_PER_KG = {
+const WASTE_PER_KG = {
   'calamari': 0.12,
   'salmone': 0.138,
 };
 
 // Fish → Category mapping (derived from historical data)
-const PESCE_CATEGORIA = {
+const FISH_CATEGORY = {
   'alici': 'Mare', 'sarde': 'Mare', 'sgombro': 'Mare', 'triglie': 'Mare',
   'paranza': 'Mare', 'gallinella': 'Mare', 'palombo': 'Mare', 'cefalo': 'Mare',
   'persico': 'Mare', 'ricciola': 'Mare', 'tonno': 'Mare', 'pesce spada': 'Mare',
@@ -83,7 +83,7 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(Promise.all([
       flushPendingWrites(env),
-      checkRimanenzeReminder(env),
+      checkRemainderReminder(env),
     ]));
   }
 };
@@ -114,14 +114,14 @@ _"richieste in eccesso: 2kg gamberi"_
       break;
 
     case '/lista':
-      const pesciCustom = Object.keys(PESCE_CATEGORIA).slice(0, 10).join(', ');
+      const pesciCustom = Object.keys(FISH_CATEGORY).slice(0, 10).join(', ');
       await sendTelegram(chatId,
         `📋 *Valori disponibili:*\n\n` +
-        `*Fornitori:* ${FORNITORI.filter(f => f !== 'Rimanenza').join(', ')}\n\n` +
-        `*Pescherie:* ${PESCHERIE.join(', ')}\n\n` +
-        `*Ristoranti:* ${RISTORANTI.join(', ')}\n\n` +
-        `*Categorie:* ${CATEGORIE.join(', ')}\n\n` +
-        `*Meteo:* ${METEO.join(', ')}\n\n` +
+        `*Fornitori:* ${SUPPLIERS.filter(f => f !== 'Rimanenza').join(', ')}\n\n` +
+        `*Pescherie:* ${FISH_SHOPS.join(', ')}\n\n` +
+        `*Ristoranti:* ${RESTAURANTS.join(', ')}\n\n` +
+        `*Categorie:* ${CATEGORIES.join(', ')}\n\n` +
+        `*Meteo:* ${WEATHER.join(', ')}\n\n` +
         `*Pesci (primi 10):* ${pesciCustom}...\n\n` +
         `Per aggiungere:\n` +
         `/aggiungi fornitore Mario\n` +
@@ -141,27 +141,27 @@ _"richieste in eccesso: 2kg gamberi"_
       if (tipo === 'pesce') {
         const [nomePesce, categoria] = valore.split(':').map(s => s.trim());
         if (!nomePesce || !categoria) {
-          await sendTelegram(chatId, `Formato pesce: /aggiungi pesce Nome:Categoria\nEs: /aggiungi pesce Branzino:Allevamento\nCategorie: ${CATEGORIE.join(', ')}`, env);
+          await sendTelegram(chatId, `Formato pesce: /aggiungi pesce Nome:Categoria\nEs: /aggiungi pesce Branzino:Allevamento\nCategorie: ${CATEGORIES.join(', ')}`, env);
           break;
         }
-        if (!CATEGORIE.includes(categoria)) {
-          await sendTelegram(chatId, `Categoria non valida. Usa: ${CATEGORIE.join(', ')}`, env);
+        if (!CATEGORIES.includes(categoria)) {
+          await sendTelegram(chatId, `Categoria non valida. Usa: ${CATEGORIES.join(', ')}`, env);
           break;
         }
         const nomePesceNorm = normalizeFishName(nomePesce);
-        PESCE_CATEGORIA[nomePesceNorm.toLowerCase()] = categoria;
-        await env.SESSIONS.put('__custom_pesce__', JSON.stringify(PESCE_CATEGORIA), { expirationTtl: 365 * 86400 });
+        FISH_CATEGORY[nomePesceNorm.toLowerCase()] = categoria;
+        await env.SESSIONS.put('__custom_pesce__', JSON.stringify(FISH_CATEGORY), { expirationTtl: 365 * 86400 });
         await sendTelegram(chatId, `✅ *${nomePesceNorm}* aggiunto come *${categoria}*`, env);
         break;
       }
       
-      const listaMap = { fornitore: FORNITORI, pescheria: PESCHERIE, meteo: METEO };
+      const listaMap = { fornitore: SUPPLIERS, pescheria: FISH_SHOPS, meteo: WEATHER };
       const lista = listaMap[tipo];
       if (!lista) {
         await sendTelegram(chatId, `Tipo non valido. Usa: fornitore, pescheria, meteo, pesce`, env);
         break;
       }
-      const esistente = trovaPiuVicino(valore, lista);
+      const esistente = findClosestMatch(valore, lista);
       if (esistente) {
         await sendTelegram(chatId, `⚠️ Esiste già un valore simile: *${esistente}*\nUsalo per evitare duplicati.`, env);
         break;
@@ -264,7 +264,7 @@ async function callClaudeOrchestrator(messages, chatId, env) {
   
   // Filter today's rows
   const todayRows = allSheetRows.filter((r, i) => i > 0 && r[0] === oggiStr);
-  const hasPurchasesToday = todayRows.some(r => r[3] !== 'Rimanenza' && !RISTORANTI.includes(r[1]));
+  const hasPurchasesToday = todayRows.some(r => r[3] !== 'Rimanenza' && !RESTAURANTS.includes(r[1]));
   
   // Build compact table of today's data
   if (todayRows.length > 0) {
@@ -273,7 +273,7 @@ async function callClaudeOrchestrator(messages, chatId, env) {
     ).join('\n');
     
     // Extract meteo and pescheria from first non-remainder pescheria row
-    const firstPurchase = todayRows.find(r => r[3] !== 'Rimanenza' && !RISTORANTI.includes(r[1]));
+    const firstPurchase = todayRows.find(r => r[3] !== 'Rimanenza' && !RESTAURANTS.includes(r[1]));
     const todayMeteo = firstPurchase?.[11] || '';
     const todayPescheria = firstPurchase?.[1] || '';
     
@@ -283,8 +283,8 @@ async function callClaudeOrchestrator(messages, chatId, env) {
       const fish = r[2];
       const kg = parseFloat(r[5]) || 0;
       if (!fishAvail[fish]) fishAvail[fish] = { pescherie: 0, ristoranti: 0 };
-      if (PESCHERIE.includes(r[1])) fishAvail[fish].pescherie += kg;
-      if (RISTORANTI.includes(r[1])) fishAvail[fish].ristoranti += kg;
+      if (FISH_SHOPS.includes(r[1])) fishAvail[fish].pescherie += kg;
+      if (RESTAURANTS.includes(r[1])) fishAvail[fish].ristoranti += kg;
     });
     const availSummary = Object.entries(fishAvail).map(([f, d]) => 
       `${f}:${d.pescherie}kg pesc,${d.ristoranti}kg rist→disp:${d.pescherie - d.ristoranti}kg`
@@ -319,11 +319,33 @@ async function callClaudeOrchestrator(messages, chatId, env) {
     contextSection += `\n\nREMAINDERS IN TODAY: ${yestSummary}`;
   }
 
+  // Sheet data for next 20 days (today + future context window)
+  const maxFutureMs = oggi.getTime() + 20 * 86400000;
+  const nearFutureRows = allSheetRows.filter((r, i) => {
+    if (i === 0 || r[0] === oggiStr) return false;
+    const parts = (r[0] || '').split('/');
+    if (parts.length !== 3) return false;
+    const rowDate = new Date(parts[2], parts[1] - 1, parts[0]);
+    return rowDate >= oggi && rowDate.getTime() <= maxFutureMs;
+  });
+  if (nearFutureRows.length > 0) {
+    const byDate = {};
+    nearFutureRows.forEach(r => {
+      const d = r[0] || '?';
+      if (!byDate[d]) byDate[d] = [];
+      byDate[d].push(`${r[1]}|${r[2]}|${r[3]}|${r[5]}kg|€${r[6]}→€${r[7]}|rim:${r[8]||'-'}`);
+    });
+    const futureLines = Object.entries(byDate).map(([d, rows]) => 
+      `[${d}] ${rows.join(' ; ')}`
+    ).join('\n');
+    contextSection += `\n\nSHEET NEXT 20 DAYS:\n${futureLines}`;
+  }
+
   const systemPrompt = `Pescheria Abascia assistant. Today: ${oggiLong}. Speak Italian.
 STYLE: Be CONCISE. Short confirmations. No emojis in JSON messages. Max 1-2 sentences for questions/confirmations.
 
 SHEET COLS: A=Data B=Pescheria C=Pesce D=Fornitore E=Categoria F=Kg G=€Acq/kg H=€Vend/kg I=Rimanenza(kg spostati) J=Scartato K=Eccesso L=Meteo M=Note N=Scarto/kg. O-AB=formulas(don't touch).
-VALID: Pescherie=[${PESCHERIE.join(',')}] Ristoranti=[${RISTORANTI.join(',')}] Fornitori=[${FORNITORI.filter(f => f !== 'Rimanenza').join(',')}] Categorie=[${CATEGORIE.join(',')}] Meteo=[${METEO.join(',')}]
+VALID: Pescherie=[${FISH_SHOPS.join(',')}] Ristoranti=[${RESTAURANTS.join(',')}] Fornitori=[${SUPPLIERS.filter(f => f !== 'Rimanenza').join(',')}] Categorie=[${CATEGORIES.join(',')}] Meteo=[${WEATHER.join(',')}]
 
 CONTEXT: The SHEET data below is the REAL current state of the file. Base ALL decisions on this data. If something looks wrong, check the data first.
 
@@ -345,7 +367,7 @@ ACTIONS:
   The function handles: OLD row col I = kg moved, NEW row col I = 0, meteo auto-copied.
 
 3.VENDITA_RISTORANTI ("venduto a [rist]","dato al ristorante")
-  ${RISTORANTI.length === 1 ? `Only 1 restaurant (${RISTORANTI[0]}), use automatically, don't ask` : 'Multiple restaurants: ask which one'}
+  ${RESTAURANTS.length === 1 ? `Only 1 restaurant (${RESTAURANTS[0]}), use automatically, don't ask` : 'Multiple restaurants: ask which one'}
   CRITICAL: Check future remainders in context FIRST. If fish has future remainders → the function will SUBTRACT from those (reducing col F of remainder row AND col I of original purchase row). If no future remainders → subtract from today's purchases.
   Validate: qty ≤ available. Ask if sale price changes (default=same).
   The function handles: meteo auto-copied from today, row creation, subtraction.
@@ -366,7 +388,13 @@ ACTIONS:
   Bulk ("cancella tutto","cancella tutte le righe"): ALWAYS ask confirmation first! "⚠️ ATTENZIONE! Operazione IRREVERSIBILE. Confermi?"
   If confirmed → action="cancellazione_multipla" with {filtro:"all"} or {filtro:"data",data:"DD/MM/YYYY"}
 
-7.CONVERSAZIONE: greetings, questions → just respond, no JSON action
+7.REPORT ("report","riepilogo","come è andata","riassunto")
+  User asks for a report of a specific date or date range. Default=today.
+  Parse date(s) from user message. Can be: "report di ieri", "report 20/02", "report da lunedì a mercoledì", "come è andata oggi?"
+  Return action="report" with dates array (DD/MM/YYYY format).
+  For date ranges, include ALL dates in the array.
+
+8.CONVERSAZIONE: greetings, questions → just respond, no JSON action
 ${contextSection}
 
 RULES:
@@ -380,11 +408,12 @@ RULES:
 RESPONSE FORMAT — return JSON when ALL data ready:
 For ACQUISTO: {"action":"acquisto","data":{"items":[{"specie":"Cozze","kg":20,"prezzo_acquisto":2,"prezzo_vendita":10,"pescheria":"Grassano","fornitore":"Brezza","meteo":"Sole","categoria":"Allevamento","data_acquisto":"${oggiStr}"}]},"message":"✅ Registrato!"}
 For RIMANENZE: {"action":"rimanenze","data":{"items":[{"specie":"Orate","kg":5}],"data_destinazione":"22/02/2026","pescheria_destinazione":"Grottole"},"message":"✅ Rimanenze registrate!"}
-For VENDITA: {"action":"vendita_ristoranti","data":{"items":[{"specie":"Cozze","kg":3}],"ristorante":"${RISTORANTI[0]}","prezzo_vendita_nuovo":null},"message":"✅ Vendita registrata!"}
+For VENDITA: {"action":"vendita_ristoranti","data":{"items":[{"specie":"Cozze","kg":3}],"ristorante":"${RESTAURANTS[0]}","prezzo_vendita_nuovo":null},"message":"✅ Vendita registrata!"}
 For ECCESSO: {"action":"eccesso","data":{"items":[{"specie":"Gamberi","kg":2}]},"message":"✅ Eccesso registrato!"}
 For AGGIORNAMENTO: {"action":"aggiornamento","data":{"data":"${oggiStr}","pescheria":"Grassano","pesce":"Cozze","campo":"prezzo_vendita","nuovo_valore":15},"message":"✅ Aggiornato!"}
 For CANCELLAZIONE: {"action":"cancellazione","data":{"data":"${oggiStr}","pescheria":"Grassano","pesce":"Cozze"},"message":"✅ Cancellato!"}
 For BULK DELETE: {"action":"cancellazione_multipla","data":{"filtro":"all"},"message":"✅ Tutto cancellato!"}
+For REPORT: {"action":"report","data":{"date":["${oggiStr}"]},"message":""}
 If need more info → respond with text only (no JSON).`;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -424,31 +453,35 @@ async function executeAction(chatId, aiResponse, env) {
   try {
     switch (aiResponse.action) {
       case 'acquisto':
-        await executeAcquisto(chatId, aiResponse.data, aiResponse.message, env);
+        await executePurchase(chatId, aiResponse.data, aiResponse.message, env);
         break;
       
       case 'rimanenze':
-        await executeRimanenze(chatId, aiResponse.data, aiResponse.message, env);
+        await executeRemainders(chatId, aiResponse.data, aiResponse.message, env);
         break;
       
       case 'vendita_ristoranti':
-        await executeVenditaRistoranti(chatId, aiResponse.data, aiResponse.message, env);
+        await executeRestaurantSale(chatId, aiResponse.data, aiResponse.message, env);
         break;
       
       case 'eccesso':
-        await executeEccesso(chatId, aiResponse.data, aiResponse.message, env);
+        await executeExcess(chatId, aiResponse.data, aiResponse.message, env);
         break;
       
       case 'aggiornamento':
-        await executeAggiornamento(chatId, aiResponse.data, aiResponse.message, env);
+        await executeUpdate(chatId, aiResponse.data, aiResponse.message, env);
         break;
       
       case 'cancellazione':
-        await executeCancellazione(chatId, aiResponse.data, aiResponse.message, env);
+        await executeDeletion(chatId, aiResponse.data, aiResponse.message, env);
         break;
       
       case 'cancellazione_multipla':
-        await executeCancellazioneMultipla(chatId, aiResponse.data, aiResponse.message, env);
+        await executeBulkDeletion(chatId, aiResponse.data, aiResponse.message, env);
+        break;
+      
+      case 'report':
+        await executeReport(chatId, aiResponse.data, env);
         break;
       
       default:
@@ -463,14 +496,14 @@ async function executeAction(chatId, aiResponse, env) {
 // SIMPLE EXECUTOR FUNCTIONS - No business logic, just write
 // ══════════════════════════════════════════════════════════════
 
-async function executeAcquisto(chatId, data, message, env) {
+async function executePurchase(chatId, data, message, env) {
   const items = data.items.map(item => ({
     ...item,
     specie: normalizeFishName(item.specie),  // Ensure normalization
-    categoria: item.categoria || categorizzaPesce(item.specie) || 'Da definire',
-    fornitore: deduplicaValore(item.fornitore, FORNITORI),
-    pescheria: deduplicaValore(item.pescheria, PESCHERIE),
-    meteo: deduplicaValore(item.meteo, METEO),
+    categoria: item.categoria || categorizeFish(item.specie) || 'Da definire',
+    fornitore: deduplicateValue(item.fornitore, SUPPLIERS),
+    pescheria: deduplicateValue(item.pescheria, FISH_SHOPS),
+    meteo: deduplicateValue(item.meteo, WEATHER),
   }));
 
   // Write to sheet
@@ -497,7 +530,7 @@ async function executeAcquisto(chatId, data, message, env) {
   }
 }
 
-async function executeRimanenze(chatId, data, message, env) {
+async function executeRemainders(chatId, data, message, env) {
   const oggi = new Date().toLocaleDateString('it-IT');
   
   // Parse flexible date if needed
@@ -528,15 +561,15 @@ async function executeRimanenze(chatId, data, message, env) {
     idx > 0 && 
     r[0] === oggi && 
     r[3] !== 'Rimanenza' && 
-    !RISTORANTI.includes(r[1]) &&  // Exclude all restaurants
-    PESCHERIE.includes(r[1]) &&    // Only pescherie
+    !RESTAURANTS.includes(r[1]) &&  // Exclude all restaurants
+    FISH_SHOPS.includes(r[1]) &&    // Only pescherie
     r[5]
   );
 
   // Build map: normalized species → original purchase data + row number
   const acquisti = {};
   todayPescheriePurchases.forEach((r) => {
-    const specie = normalizza(r[2] || '');
+    const specie = normalize(r[2] || '');
     const rowNumber = allRows.indexOf(r) + 1; // 1-based
     
     if (!acquisti[specie]) {
@@ -558,7 +591,7 @@ async function executeRimanenze(chatId, data, message, env) {
   const updates = [];
   
   for (const item of data.items) {
-    const specieNorm = normalizza(item.specie);
+    const specieNorm = normalize(item.specie);
     const originalData = acquisti[specieNorm];
     
     if (!originalData) {
@@ -613,12 +646,12 @@ async function executeRimanenze(chatId, data, message, env) {
   await sendTelegram(chatId, `✅ ${message}`, env);
 }
 
-async function executeVenditaRistoranti(chatId, data, message, env) {
+async function executeRestaurantSale(chatId, data, message, env) {
   const oggi = new Date().toLocaleDateString('it-IT');
   const domani = new Date(Date.now() + 86400000).toLocaleDateString('it-IT');
   
   // Get restaurant name from data (Claude decided which one)
-  const ristorante = data.ristorante || RISTORANTI[0];  // Default to first if not specified
+  const ristorante = data.ristorante || RESTAURANTS[0];  // Default to first if not specified
   
   const sa = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
   const token = await getGoogleToken(sa);
@@ -640,14 +673,14 @@ async function executeVenditaRistoranti(chatId, data, message, env) {
   const newRows = [];
   
   for (const item of data.items) {
-    const specieNorm = normalizza(item.specie);
+    const specieNorm = normalize(item.specie);
     let found = false;
     
     // First, check for future remainders
     for (let i = 1; i < allRows.length; i++) {
       const row = allRows[i];
       if (row[3] === 'Rimanenza' && 
-          normalizza(row[2] || '') === specieNorm &&
+          normalize(row[2] || '') === specieNorm &&
           row[0] >= domani) {
         
         const kgRimanenza = parseFloat(row[5]) || 0;
@@ -665,9 +698,9 @@ async function executeVenditaRistoranti(chatId, data, message, env) {
           for (let j = 1; j < allRows.length; j++) {
             const origRow = allRows[j];
             if (origRow[0] === oggi && 
-                normalizza(origRow[2] || '') === specieNorm &&
+                normalize(origRow[2] || '') === specieNorm &&
                 origRow[3] !== 'Rimanenza' &&
-                !RISTORANTI.includes(origRow[1])) {
+                !RESTAURANTS.includes(origRow[1])) {
               const origI = parseFloat(origRow[8]) || 0;
               if (origI > 0) {
                 updates.push({
@@ -728,9 +761,9 @@ async function executeVenditaRistoranti(chatId, data, message, env) {
       for (let i = 1; i < allRows.length; i++) {
         const row = allRows[i];
         if (row[0] === oggi && 
-            normalizza(row[2] || '') === specieNorm &&
+            normalize(row[2] || '') === specieNorm &&
             row[3] !== 'Rimanenza' &&
-            !RISTORANTI.includes(row[1])) {  // Exclude all restaurants
+            !RESTAURANTS.includes(row[1])) {  // Exclude all restaurants
           
           const kgOriginale = parseFloat(row[5]) || 0;
           if (kgOriginale >= item.kg) {
@@ -794,7 +827,7 @@ async function executeVenditaRistoranti(chatId, data, message, env) {
   await sendTelegram(chatId, `✅ ${message}`, env);
 }
 
-async function executeEccesso(chatId, data, message, env) {
+async function executeExcess(chatId, data, message, env) {
   const oggi = new Date().toLocaleDateString('it-IT');
   
   const sa = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
@@ -815,11 +848,11 @@ async function executeEccesso(chatId, data, message, env) {
   
   const updates = [];
   for (const item of data.items) {
-    const specieNorm = normalizza(item.specie);
+    const specieNorm = normalize(item.specie);
     
     for (let i = 1; i < allRows.length; i++) {
       const row = allRows[i];
-      if (row[0] === oggi && normalizza(row[2] || '') === specieNorm) {
+      if (row[0] === oggi && normalize(row[2] || '') === specieNorm) {
         const rowNumber = i + 1;
         updates.push({
           range: `'${sheetName}'!K${rowNumber}`,
@@ -847,11 +880,11 @@ async function executeEccesso(chatId, data, message, env) {
   await sendTelegram(chatId, `✅ ${message}`, env);
 }
 
-async function executeCancellazione(chatId, data, message, env) {
+async function executeDeletion(chatId, data, message, env) {
   // PRIMARY KEY: (data, pescheria, pesce)
   const targetData = data.data;
   const targetPescheria = data.pescheria;
-  const targetPesce = normalizza(data.pesce);
+  const targetPesce = normalize(data.pesce);
   
   const sa = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
   const token = await getGoogleToken(sa);
@@ -874,8 +907,8 @@ async function executeCancellazione(chatId, data, message, env) {
   for (let i = 1; i < allRows.length; i++) {
     const row = allRows[i];
     if (row[0] === targetData && 
-        normalizza(row[1] || '') === normalizza(targetPescheria) &&
-        normalizza(row[2] || '') === targetPesce) {
+        normalize(row[1] || '') === normalize(targetPescheria) &&
+        normalize(row[2] || '') === targetPesce) {
       rowToDelete = i + 1; // 1-based
       break;
     }
@@ -921,7 +954,7 @@ async function executeCancellazione(chatId, data, message, env) {
   await sendTelegram(chatId, `✅ ${message}\n\nCancellata entry: ${targetData} | ${targetPescheria} | ${data.pesce}`, env);
 }
 
-async function executeCancellazioneMultipla(chatId, data, message, env) {
+async function executeBulkDeletion(chatId, data, message, env) {
   // Bulk deletion: delete all rows or all rows of specific date
   const sa = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
   const token = await getGoogleToken(sa);
@@ -1011,7 +1044,7 @@ async function executeCancellazioneMultipla(chatId, data, message, env) {
   await sendTelegram(chatId, `✅ ${message}\n\n${summary}`, env);
 }
 
-async function executeAggiornamento(chatId, data, message, env) {
+async function executeUpdate(chatId, data, message, env) {
   // Simple executor: Claude already validated everything
   // Just execute what Claude decided
   
@@ -1034,7 +1067,7 @@ async function executeAggiornamento(chatId, data, message, env) {
   // SPECIAL CASE: Remainder correction (tipo="rimanenza")
   if (data.tipo === 'rimanenza') {
     const dataOriginale = data.data_originale || new Date().toLocaleDateString('it-IT');
-    const targetPesce = normalizza(data.pesce || '');
+    const targetPesce = normalize(data.pesce || '');
     
     // Find most recent remainder with notes "da [dataOriginale]"
     let rowToUpdate = -1;
@@ -1044,7 +1077,7 @@ async function executeAggiornamento(chatId, data, message, env) {
     for (let i = allRows.length - 1; i >= 1; i--) {
       const row = allRows[i];
       if (row[3] === 'Rimanenza' && 
-          normalizza(row[2] || '') === targetPesce &&
+          normalize(row[2] || '') === targetPesce &&
           row[12] && row[12].includes(`da ${dataOriginale}`)) {
         rowToUpdate = i + 1; // 1-based
         break;
@@ -1055,9 +1088,9 @@ async function executeAggiornamento(chatId, data, message, env) {
     for (let i = 1; i < allRows.length; i++) {
       const row = allRows[i];
       if (row[0] === dataOriginale && 
-          normalizza(row[2] || '') === targetPesce &&
+          normalize(row[2] || '') === targetPesce &&
           row[3] !== 'Rimanenza' &&
-          !RISTORANTI.includes(row[1])) {
+          !RESTAURANTS.includes(row[1])) {
         oldRowNumber = i + 1; // 1-based
         break;
       }
@@ -1103,7 +1136,7 @@ async function executeAggiornamento(chatId, data, message, env) {
   // NORMAL CASE: Explicit update with PRIMARY KEY
   const targetData = data.data;
   const targetPescheria = data.pescheria;
-  const targetPesce = normalizza(data.pesce || '');
+  const targetPesce = normalize(data.pesce || '');
   const campo = data.campo;
   const nuovoValore = data.nuovo_valore;
   
@@ -1112,8 +1145,8 @@ async function executeAggiornamento(chatId, data, message, env) {
   for (let i = 1; i < allRows.length; i++) {
     const row = allRows[i];
     if (row[0] === targetData && 
-        normalizza(row[1] || '') === normalizza(targetPescheria) &&
-        normalizza(row[2] || '') === targetPesce) {
+        normalize(row[1] || '') === normalize(targetPescheria) &&
+        normalize(row[2] || '') === targetPesce) {
       rowToUpdate = i + 1; // 1-based
       break;
     }
@@ -1133,7 +1166,7 @@ async function executeAggiornamento(chatId, data, message, env) {
     'scarto_per_kg': 'N'
   };
   
-  const column = fieldToColumn[normalizza(campo || '')];
+  const column = fieldToColumn[normalize(campo || '')];
   
   if (rowToUpdate > 0 && column) {
     // Update the cell
@@ -1160,45 +1193,52 @@ async function executeAggiornamento(chatId, data, message, env) {
 // UTILITY FUNCTIONS
 // ══════════════════════════════════════════════════════════════
 
+// Parse numbers from European format: strips €, spaces, converts comma to dot
+function parseNum(val) {
+  if (val == null || val === '') return 0;
+  const cleaned = String(val).replace(/[€\s]/g, '').replace(',', '.');
+  return parseFloat(cleaned) || 0;
+}
+
 function normalizeFishName(name) {
   if (!name) return name;
   // First letter uppercase, rest lowercase
   return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
 }
 
-function normalizza(str) {
+function normalize(str) {
   return str.toLowerCase().replace(/[^a-z0-9àèéìòù]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-function trovaPiuVicino(input, lista) {
+function findClosestMatch(input, lista) {
   if (!input) return null;
-  const norm = normalizza(input);
+  const norm = normalize(input);
   for (const v of lista) {
-    if (normalizza(v) === norm) return v;
+    if (normalize(v) === norm) return v;
   }
   for (const v of lista) {
-    const nv = normalizza(v);
+    const nv = normalize(v);
     if (nv.includes(norm) || norm.includes(nv)) return v;
   }
   return null;
 }
 
-function deduplicaValore(input, lista) {
+function deduplicateValue(input, lista) {
   if (!input) return input;
-  return trovaPiuVicino(input, lista) || input;
+  return findClosestMatch(input, lista) || input;
 }
 
-function categorizzaPesce(nomePesce) {
-  const norm = normalizza(nomePesce);
-  for (const [keyword, cat] of Object.entries(PESCE_CATEGORIA)) {
-    if (norm.includes(normalizza(keyword))) return cat;
+function categorizeFish(nomePesce) {
+  const norm = normalize(nomePesce);
+  for (const [keyword, cat] of Object.entries(FISH_CATEGORY)) {
+    if (norm.includes(normalize(keyword))) return cat;
   }
   return null;
 }
 
-function getScartoPerKg(nomePesce) {
-  const norm = normalizza(nomePesce);
-  for (const [keyword, scarto] of Object.entries(SCARTO_PER_KG)) {
+function getWastePerKg(nomePesce) {
+  const norm = normalize(nomePesce);
+  for (const [keyword, scarto] of Object.entries(WASTE_PER_KG)) {
     if (norm.includes(keyword)) return scarto;
   }
   return 0;
@@ -1268,7 +1308,7 @@ async function enqueueBatchWrite(items, type, env) {
 
   if (type === 'acquisto') {
     for (const item of items) {
-      const scarto = getScartoPerKg(item.specie);
+      const scarto = getWastePerKg(item.specie);
       pending.push([
         item.data_acquisto, item.pescheria, item.specie, item.fornitore,
         item.categoria, item.kg, item.prezzo_acquisto, item.prezzo_vendita,
@@ -1326,7 +1366,7 @@ async function writeRowsToSheet(rows, env) {
   // Build rows with formulas
   const rowsConFormule = rows.map((row, idx) => {
     const r = firstEmptyRow + idx;
-    return buildRigaConFormule(row, r);
+    return buildRowWithFormulas(row, r);
   });
 
   // Write to sheet
@@ -1345,7 +1385,7 @@ async function writeRowsToSheet(rows, env) {
   await formatColumns(sheetId, sheetName, token, firstEmptyRow, rowsConFormule.length);
 }
 
-function buildRigaConFormule(row, r) {
+function buildRowWithFormulas(row, r) {
   const scarto = row[13] ?? 0;
   return [
     row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7],
@@ -1470,12 +1510,32 @@ async function updateWeatherForToday(meteo, data, env) {
 // REPORT & REMINDER
 // ══════════════════════════════════════════════════════════════
 
-async function buildReport(env) {
+async function executeReport(chatId, data, env) {
+  const dates = data.date || [new Date().toLocaleDateString('it-IT')];
+  const reports = [];
+  for (const d of dates) {
+    // Parse flexible dates if needed
+    let dateStr = d;
+    if (!/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(dateStr)) {
+      dateStr = await parseFlexibleDate(dateStr, env) || dateStr;
+    }
+    try {
+      reports.push(await buildReport(env, dateStr));
+    } catch (e) {
+      reports.push(`⚠️ Errore report ${dateStr}: ${e.message}`);
+    }
+  }
+  await sendTelegram(chatId, reports.join('\n\n━━━━━━━━━━━━━━━━━━━━\n\n'), env);
+}
+
+async function buildReport(env, targetDate = null) {
   const sa = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
   const token = await getGoogleToken(sa);
   const sheetName = env.SHEET_NAME || 'AIPescheriaBot';
   const range = encodeURIComponent(`'${sheetName}'!A:AB`);
-  const oggi = new Date().toLocaleDateString('it-IT');
+  
+  // Default to today if no date specified
+  const reportDate = targetDate || new Date().toLocaleDateString('it-IT');
 
   const res = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${env.SHEET_ID}/values/${range}`,
@@ -1485,10 +1545,10 @@ async function buildReport(env) {
   const data = await res.json();
 
   const rows = (data.values || []).filter(r =>
-    r[0] === oggi && r[3] !== 'Rimanenza' && r[5]
+    r[0] === reportDate && r[3] !== 'Rimanenza' && r[5]
   );
 
-  if (!rows.length) return `📊 *Report ${oggi}*\n\nNessun acquisto registrato oggi.`;
+  if (!rows.length) return `📊 *Report ${reportDate}*\n\nNessun acquisto registrato.`;
 
   let totKg = 0, totSpesa = 0, totIncassoLordo = 0, totIncassoNetto = 0;
   const fishDetails = [];
@@ -1496,10 +1556,10 @@ async function buildReport(env) {
   rows.forEach(r => {
     const pesce = r[2] || '';
     const categoria = r[4] || '';
-    const kg = parseFloat(r[5]) || 0;
-    const pa = parseFloat(r[6]) || 0;
-    const pv = parseFloat(r[7]) || 0;
-    const rim = parseFloat(r[8]) || 0;
+    const kg = parseNum(r[5]);
+    const pa = parseNum(r[6]);
+    const pv = parseNum(r[7]);
+    const rim = parseNum(r[8]);
     
     const spesa = kg * pa;
     const incassoLordo = kg * pv;
@@ -1522,7 +1582,7 @@ async function buildReport(env) {
 
   const totMarginePerc = totIncassoLordo > 0 ? (totIncassoNetto / totIncassoLordo * 100) : 0;
 
-  return `📊 *Report ${oggi}*\n\n` +
+  return `📊 *Report ${reportDate}*\n\n` +
     `${lines.join('\n\n')}\n\n` +
     `━━━━━━━━━━━━━━━━━━━━\n` +
     `📦 Totale: *${totKg.toFixed(1)}kg*\n` +
@@ -1533,7 +1593,7 @@ async function buildReport(env) {
     `_Esclusi: benzine e sigarette (bonus aziendale)_`;
 }
 
-async function checkRimanenzeReminder(env) {
+async function checkRemainderReminder(env) {
   const now = new Date();
   if (now.getUTCHours() !== REMINDER_HOUR_UTC) return;
   const key = `__reminder__${now.toISOString().slice(0, 13)}`;
@@ -1594,13 +1654,13 @@ async function loadCustomLists(env) {
       env.SESSIONS.get('__custom_meteo__'),
       env.SESSIONS.get('__custom_pesce__'),
     ]);
-    if (f) { const v = JSON.parse(f); FORNITORI.length = 0; FORNITORI.push(...v); }
-    if (p) { const v = JSON.parse(p); PESCHERIE.length = 0; PESCHERIE.push(...v); }
-    if (m) { const v = JSON.parse(m); METEO.length = 0; METEO.push(...v); }
+    if (f) { const v = JSON.parse(f); SUPPLIERS.length = 0; SUPPLIERS.push(...v); }
+    if (p) { const v = JSON.parse(p); FISH_SHOPS.length = 0; FISH_SHOPS.push(...v); }
+    if (m) { const v = JSON.parse(m); WEATHER.length = 0; WEATHER.push(...v); }
     if (fish) { 
       const v = JSON.parse(fish); 
-      Object.keys(PESCE_CATEGORIA).forEach(k => delete PESCE_CATEGORIA[k]);
-      Object.assign(PESCE_CATEGORIA, v);
+      Object.keys(FISH_CATEGORY).forEach(k => delete FISH_CATEGORY[k]);
+      Object.assign(FISH_CATEGORY, v);
     }
   } catch {}
 }
