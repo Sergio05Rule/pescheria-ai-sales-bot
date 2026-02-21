@@ -41,7 +41,7 @@ const BATCH_THRESHOLD = 5;
 const SESSION_TTL = 7200;
 const MAX_HISTORY = 20;
 const REMINDER_HOUR_UTC = 11; // 13:00 Italian time (UTC+2)
-const AUTHORIZED_USERS = [449768582];
+const AUTHORIZED_USERS = [449768582, 5041769858];
 
 // ── Entry Point ──────────────────────────────────────────────
 export default {
@@ -1550,9 +1550,8 @@ async function buildReport(env, targetDate = null) {
 
   if (!rows.length) return `📊 *Report ${reportDate}*\n\nNessun acquisto registrato.`;
 
-  let totKg = 0, totSpesa = 0, totIncassoLordo = 0, totIncassoNetto = 0;
-  const fishDetails = [];
-
+  // Consolidate rows with same fish, category and prices
+  const consolidated = {};
   rows.forEach(r => {
     const pesce = r[2] || '';
     const categoria = r[4] || '';
@@ -1560,18 +1559,30 @@ async function buildReport(env, targetDate = null) {
     const pa = parseNum(r[6]);
     const pv = parseNum(r[7]);
     const rim = parseNum(r[8]);
+    const key = `${pesce}|${categoria}|${pa}|${pv}`;
     
-    const spesa = kg * pa;
-    const incassoLordo = kg * pv;
+    if (!consolidated[key]) {
+      consolidated[key] = { pesce, categoria, kg: 0, pa, pv, rim: 0 };
+    }
+    consolidated[key].kg += kg;
+    consolidated[key].rim += rim;
+  });
+
+  let totKg = 0, totSpesa = 0, totIncassoLordo = 0, totIncassoNetto = 0;
+  const fishDetails = [];
+
+  Object.values(consolidated).forEach(f => {
+    const spesa = f.kg * f.pa;
+    const incassoLordo = f.kg * f.pv;
     const margineEuro = incassoLordo - spesa;
     const marginePerc = incassoLordo > 0 ? (margineEuro / incassoLordo * 100) : 0;
     
-    totKg += kg;
+    totKg += f.kg;
     totSpesa += spesa;
     totIncassoLordo += incassoLordo;
     totIncassoNetto += margineEuro;
     
-    fishDetails.push({ pesce, categoria, kg, pa, pv, rim, margineEuro, marginePerc });
+    fishDetails.push({ ...f, margineEuro, marginePerc });
   });
 
   const lines = fishDetails.map(f => 
