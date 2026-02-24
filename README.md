@@ -71,7 +71,12 @@ SHEET_NAME=AIPescheriaBot
 
 ## 📊 Report & Waste Calculation
 
-Reports (`/report` or natural language) read the sheet in real time and calculate margins accounting for waste (scarto). For fish with waste (e.g., salmon, squid), the sellable kg is reduced: `kgVendibili = kg - rimanenza - scartoKg`. Margins are calculated on sellable kg only, giving an accurate picture of actual profitability. Rows with identical fish, category, and prices are consolidated into a single line.
+Reports (`/report` or natural language) read the sheet in real time and split data into two categories:
+
+- `🐟 Acquisti` — new purchases for that date. Capital is counted, margins calculated with waste deducted.
+- `♻️ Rimanenze` — leftover fish moved from a previous day. No capital cost (already paid), only expected revenue shown.
+
+Waste (scarto) is applied to both: `kgVendibili = kg - scarto`. For purchases, remainders (col I) are also subtracted. Rows with identical fish/category/prices are consolidated. The summary shows capital spent (purchases only), total expected revenue (purchases + remainders), remainder value as a separate line, and net margin.
 
 ## 📊 Sheet Structure
 
