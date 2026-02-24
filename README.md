@@ -10,9 +10,13 @@ AI-powered Telegram bot for fish shop inventory management — natural language 
 - **Restaurant Sales** — subtracts from future remainders first, then today's stock
 - **Excess Requests** — tracks unsatisfied demand, warns if inconsistent with remainders
 - **Updates & Deletes** — conversational corrections or explicit edits, single or bulk deletion
-- **Daily Reports** — flexible reports by date (any date, even future), via `/report` command or natural language
+- **Multi-Action Support** — AI can execute multiple operations in a single message (batch updates, deletes, etc.)
+- **Daily Reports** — flexible reports by date (any date, even future), via `/report` command or natural language; margins account for waste (scarto) on applicable fish
 - **Smart Validation** — AI checks all data against real sheet state before executing (today + next 20 days context)
-- **European Number Parsing** — handles `€ 2,70` and `5,00` formats from Google Sheets
+- **Double Message Protection** — concurrency lock in KV: while processing, all incoming messages are dropped with a "⏳" notification
+- **Single-Message Responses** — multi-item operations (purchases, updates, deletes) produce one consolidated message, not one per item
+- **Daily Session Reset** — conversation history resets each day, AI re-reads sheet fresh on first interaction
+- **Real-Time Writes** — all operations write directly to Google Sheets, no batching or queuing
 - **Cost Efficient** — ~$1/month with Claude Haiku 4.5
 
 ## 🏗️ Architecture
@@ -20,15 +24,16 @@ AI-powered Telegram bot for fish shop inventory management — natural language 
 ```
 User Message (Italian, natural language)
     ↓
+Concurrency Guard (KV lock per chat — drops messages while busy)
+    ↓
 Claude Haiku 4.5 (Orchestrator)
-  - Understands intent
-  - Reads full sheet state
+  - Reads full sheet state (real-time)
   - Validates data
-  - Decides action
+  - Decides action (single or multi)
     ↓
 Simple Executor Functions (no business logic)
     ↓
-Google Sheets
+Google Sheets (direct write, no batching)
 ```
 
 All business logic lives in the AI prompt. Functions are dumb executors — they just write/update/delete rows. Change behavior by editing the prompt, not the code.
@@ -62,7 +67,11 @@ SHEET_NAME=AIPescheriaBot
 | `executeUpdate()` | Updates any field by PRIMARY KEY (data, pescheria, pesce) |
 | `executeDeletion()` | Deletes single row by PRIMARY KEY |
 | `executeBulkDeletion()` | Bulk delete with mandatory confirmation |
-| `executeReport()` | Generates report for one or more dates (reads sheet in real time) |
+| `executeReport()` | Generates report for one or more dates (reads sheet in real time, accounts for waste/scarto in margins) |
+
+## 📊 Report & Waste Calculation
+
+Reports (`/report` or natural language) read the sheet in real time and calculate margins accounting for waste (scarto). For fish with waste (e.g., salmon, squid), the sellable kg is reduced: `kgVendibili = kg - rimanenza - scartoKg`. Margins are calculated on sellable kg only, giving an accurate picture of actual profitability. Rows with identical fish, category, and prices are consolidated into a single line.
 
 ## 📊 Sheet Structure
 
@@ -115,6 +124,9 @@ Cloudflare Workers, Google Sheets API, and Telegram Bot API are all free tier.
 5. **Single API call for context** — one sheet read beats four separate helpers (fewer calls, consistent data)
 6. **Parse European numbers** — Google Sheets returns `€ 2,70` format; always strip symbols and convert commas before parsing
 7. **Bounded context window** — AI sees today + next 20 days, not the entire sheet history; keeps token usage predictable
+8. **Concurrency lock, not dedup** — KV lock per chat drops all messages while one is processing; simpler and more robust than timestamp-based dedup
+9. **Reset session daily** — stale conversation history causes AI to hallucinate; daily reset keeps context aligned with real sheet state
+10. **Write directly, don't batch** — Google Sheets API is free; batching adds complexity for zero benefit
 
 ## 🔮 Next Steps
 

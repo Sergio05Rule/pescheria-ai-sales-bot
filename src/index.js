@@ -37,19 +37,13 @@ const FISH_CATEGORY = {
 };
 
 // ── Configuration ────────────────────────────────────────────
-const BATCH_THRESHOLD = 5;
 const SESSION_TTL = 7200;
 const MAX_HISTORY = 20;
-const REMINDER_HOUR_UTC = 11; // 13:00 Italian time (UTC+2)
 const AUTHORIZED_USERS = [449768582, 5041769858];
 
 // ── Entry Point ──────────────────────────────────────────────
 export default {
   async fetch(request, env, ctx) {
-    if (request.method === 'GET' && new URL(request.url).pathname === '/flush') {
-      await flushPendingWrites(env);
-      return new Response('Flushed');
-    }
     if (request.method !== 'POST') return new Response('OK');
 
     let body;
@@ -69,22 +63,25 @@ export default {
       return new Response('OK');
     }
 
+    // Concurrency guard: drop message if bot is already processing for this chat
+    const lockKey = `__lock__${chatId}`;
+    const lock = await env.SESSIONS.get(lockKey);
+    if (lock) {
+      await sendTelegram(chatId, `⏳ Sto ancora elaborando il messaggio precedente. Attendi...`, env);
+      return new Response('OK');
+    }
+    await env.SESSIONS.put(lockKey, '1', { expirationTtl: 60 });
+
     await loadCustomLists(env);
 
     ctx.waitUntil(
-      text.startsWith('/')
+      (text.startsWith('/')
         ? handleCommand(chatId, text, env)
         : handleMessage(chatId, text, env)
+      ).finally(() => env.SESSIONS.delete(lockKey))
     );
 
     return new Response('OK');
-  },
-
-  async scheduled(event, env, ctx) {
-    ctx.waitUntil(Promise.all([
-      flushPendingWrites(env),
-      checkRemainderReminder(env),
-    ]));
   }
 };
 
@@ -108,9 +105,7 @@ _"richieste in eccesso: 2kg gamberi"_
 /report — riepilogo giornata
 /lista — mostra valori disponibili
 /aggiungi — aggiungi fornitore/pescheria/meteo
-/reset — azzera sessione
-
-⏰ Reminder automatico alle 13:00.`, env);
+/reset — azzera sessione`, env);
       break;
 
     case '/lista':
@@ -200,9 +195,14 @@ _"richieste in eccesso: 2kg gamberi"_
 
 async function handleMessage(chatId, text, env) {
   const session = await loadSession(chatId, env);
+  const todayStr = new Date().toLocaleDateString('it-IT');
 
-  // Deduplication: same text already processed → ignore
-  if (session.lastProcessedText === text) return;
+  // Daily session reset: clear history if day changed (keeps sheet context fresh)
+  if (session.sessionDate && session.sessionDate !== todayStr) {
+    session.messages = [];
+    session.lastProcessedText = null;
+  }
+  session.sessionDate = todayStr;
 
   // Add user message to conversation history
   session.messages = session.messages || [];
@@ -212,20 +212,34 @@ async function handleMessage(chatId, text, env) {
   try {
     aiResponse = await callClaudeOrchestrator(session.messages, chatId, env);
   } catch (e) {
+    session.messages.pop(); // Remove failed user message from history
+    await saveSession(chatId, session, env);
     await sendTelegram(chatId, `⚠️ Errore AI: ${e.message}\n\nRiprova.`, env);
     return;
   }
 
-  // Add AI response to history
+  // Add AI response to history and save
   session.messages.push({ role: 'assistant', content: aiResponse.rawText });
   session.lastProcessedText = text;
   await saveSession(chatId, session, env);
 
   // Execute action based on AI decision
-  if (aiResponse.action) {
-    await executeAction(chatId, aiResponse, env);
+  if (aiResponse.actions) {
+    // Multi-action: execute all silently, send one summary at the end
+    const results = [];
+    for (const act of aiResponse.actions) {
+      try {
+        await executeAction(chatId, act, env, true); // silent mode
+        if (act.message) results.push(act.message);
+      } catch (e) {
+        results.push(`⚠️ Errore: ${e.message}`);
+      }
+    }
+    const summary = aiResponse.message || results.join('\n');
+    await sendTelegram(chatId, summary, env);
+  } else if (aiResponse.action) {
+    await executeAction(chatId, aiResponse, env, false);
   } else {
-    // Simple conversation response
     await sendTelegram(chatId, aiResponse.text, env);
   }
 }
@@ -414,6 +428,10 @@ For AGGIORNAMENTO: {"action":"aggiornamento","data":{"data":"${oggiStr}","pesche
 For CANCELLAZIONE: {"action":"cancellazione","data":{"data":"${oggiStr}","pescheria":"Grassano","pesce":"Cozze"},"message":"✅ Cancellato!"}
 For BULK DELETE: {"action":"cancellazione_multipla","data":{"filtro":"all"},"message":"✅ Tutto cancellato!"}
 For REPORT: {"action":"report","data":{"date":["${oggiStr}"]},"message":""}
+MULTI-ACTION (when user requests multiple operations at once):
+{"actions":[{"action":"aggiornamento","data":{...},"message":"..."},{"action":"aggiornamento","data":{...},"message":"..."}],"message":"✅ Tutto aggiornato!"}
+Use "actions" array when user asks to update/delete/modify MULTIPLE rows in one message. Each element has its own action+data+message.
+IMPORTANT: For ACQUISTO with multiple items (even from different suppliers), ALWAYS use a SINGLE action with items array, NOT an "actions" array of individual acquisto actions. The items array supports multiple suppliers in one action.
 If need more info → respond with text only (no JSON).`;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -425,7 +443,7 @@ If need more info → respond with text only (no JSON).`;
     },
     body: JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 512,
+      max_tokens: 2048,
       system: systemPrompt,
       messages
     })
@@ -437,6 +455,10 @@ If need more info → respond with text only (no JSON).`;
 
   // Try to parse JSON response
   const parsed = extractJSON(rawText);
+  if (parsed?.actions && Array.isArray(parsed.actions)) {
+    // Multi-action response
+    return { actions: parsed.actions, message: parsed.message, rawText };
+  }
   if (parsed?.action) {
     return { action: parsed.action, data: parsed.data, message: parsed.message, rawText };
   }
@@ -449,35 +471,35 @@ If need more info → respond with text only (no JSON).`;
 // ACTION EXECUTOR - Routes to simple executor functions
 // ══════════════════════════════════════════════════════════════
 
-async function executeAction(chatId, aiResponse, env) {
+async function executeAction(chatId, aiResponse, env, silent = false) {
   try {
     switch (aiResponse.action) {
       case 'acquisto':
-        await executePurchase(chatId, aiResponse.data, aiResponse.message, env);
+        await executePurchase(chatId, aiResponse.data, aiResponse.message, env, silent);
         break;
       
       case 'rimanenze':
-        await executeRemainders(chatId, aiResponse.data, aiResponse.message, env);
+        await executeRemainders(chatId, aiResponse.data, aiResponse.message, env, silent);
         break;
       
       case 'vendita_ristoranti':
-        await executeRestaurantSale(chatId, aiResponse.data, aiResponse.message, env);
+        await executeRestaurantSale(chatId, aiResponse.data, aiResponse.message, env, silent);
         break;
       
       case 'eccesso':
-        await executeExcess(chatId, aiResponse.data, aiResponse.message, env);
+        await executeExcess(chatId, aiResponse.data, aiResponse.message, env, silent);
         break;
       
       case 'aggiornamento':
-        await executeUpdate(chatId, aiResponse.data, aiResponse.message, env);
+        await executeUpdate(chatId, aiResponse.data, aiResponse.message, env, silent);
         break;
       
       case 'cancellazione':
-        await executeDeletion(chatId, aiResponse.data, aiResponse.message, env);
+        await executeDeletion(chatId, aiResponse.data, aiResponse.message, env, silent);
         break;
       
       case 'cancellazione_multipla':
-        await executeBulkDeletion(chatId, aiResponse.data, aiResponse.message, env);
+        await executeBulkDeletion(chatId, aiResponse.data, aiResponse.message, env, silent);
         break;
       
       case 'report':
@@ -485,10 +507,11 @@ async function executeAction(chatId, aiResponse, env) {
         break;
       
       default:
-        await sendTelegram(chatId, `⚠️ Azione sconosciuta: ${aiResponse.action}`, env);
+        if (!silent) await sendTelegram(chatId, `⚠️ Azione sconosciuta: ${aiResponse.action}`, env);
     }
   } catch (e) {
-    await sendTelegram(chatId, `⚠️ Errore esecuzione: ${e.message}`, env);
+    if (!silent) await sendTelegram(chatId, `⚠️ Errore esecuzione: ${e.message}`, env);
+    else throw e;
   }
 }
 
@@ -496,7 +519,7 @@ async function executeAction(chatId, aiResponse, env) {
 // SIMPLE EXECUTOR FUNCTIONS - No business logic, just write
 // ══════════════════════════════════════════════════════════════
 
-async function executePurchase(chatId, data, message, env) {
+async function executePurchase(chatId, data, message, env, silent = false) {
   const items = data.items.map(item => ({
     ...item,
     specie: normalizeFishName(item.specie),  // Ensure normalization
@@ -507,30 +530,32 @@ async function executePurchase(chatId, data, message, env) {
   }));
 
   // Write to sheet
-  await enqueueBatchWrite(items, 'acquisto', env);
-  await flushPendingWrites(env);
+  const rows = items.map(item => [
+    item.data_acquisto, item.pescheria, item.specie, item.fornitore,
+    item.categoria, item.kg, item.prezzo_acquisto, item.prezzo_vendita,
+    '', '', '', item.meteo, '', getWastePerKg(item.specie),
+  ]);
+  await writeRowsToSheet(rows, env);
 
   // Update weather for all rows of today
   if (items.length > 0 && items[0].meteo) {
     await updateWeatherForToday(items[0].meteo, items[0].data_acquisto, env);
   }
 
-  // Add to active chats
-  await addActiveChatId(chatId, env);
-
-  // Send confirmation
-  await sendTelegram(chatId, `✅ ${message}\n\n${formatSummary(items)}`, env);
-
-  // Send automatic report
-  try {
-    const report = await buildReport(env);
-    await sendTelegram(chatId, report, env);
-  } catch (e) {
-    console.error('Report error:', e);
+  if (!silent) {
+    // Send single confirmation with summary + report
+    let response = `✅ ${message}\n\n${formatSummary(items)}`;
+    try {
+      const report = await buildReport(env);
+      response += `\n\n${report}`;
+    } catch (e) {
+      console.error('Report error:', e);
+    }
+    await sendTelegram(chatId, response, env);
   }
 }
 
-async function executeRemainders(chatId, data, message, env) {
+async function executeRemainders(chatId, data, message, env, silent = false) {
   const oggi = new Date().toLocaleDateString('it-IT');
   
   // Parse flexible date if needed
@@ -595,7 +620,7 @@ async function executeRemainders(chatId, data, message, env) {
     const originalData = acquisti[specieNorm];
     
     if (!originalData) {
-      await sendTelegram(chatId, `⚠️ ${item.specie} non trovato negli acquisti di pescherie oggi. Ignoro.`, env);
+      if (!silent) await sendTelegram(chatId, `⚠️ ${item.specie} non trovato negli acquisti di pescherie oggi. Ignoro.`, env);
       continue;
     }
     
@@ -623,7 +648,7 @@ async function executeRemainders(chatId, data, message, env) {
   }
 
   if (newRows.length === 0) {
-    await sendTelegram(chatId, `⚠️ Nessuna rimanenza valida da salvare.`, env);
+    if (!silent) await sendTelegram(chatId, `⚠️ Nessuna rimanenza valida da salvare.`, env);
     return;
   }
 
@@ -640,13 +665,12 @@ async function executeRemainders(chatId, data, message, env) {
   }
 
   // Write new rows
-  await enqueueBatchWrite(newRows, 'raw', env);
-  await flushPendingWrites(env);
+  await writeRowsToSheet(newRows, env);
 
-  await sendTelegram(chatId, `✅ ${message}`, env);
+  if (!silent) await sendTelegram(chatId, `✅ ${message}`, env);
 }
 
-async function executeRestaurantSale(chatId, data, message, env) {
+async function executeRestaurantSale(chatId, data, message, env, silent = false) {
   const oggi = new Date().toLocaleDateString('it-IT');
   const domani = new Date(Date.now() + 86400000).toLocaleDateString('it-IT');
   
@@ -802,7 +826,7 @@ async function executeRestaurantSale(chatId, data, message, env) {
     }
     
     if (!found) {
-      await sendTelegram(chatId, `⚠️ ${item.specie}: quantità non disponibile. Ignoro.`, env);
+      if (!silent) await sendTelegram(chatId, `⚠️ ${item.specie}: quantità non disponibile. Ignoro.`, env);
     }
   }
   
@@ -820,14 +844,13 @@ async function executeRestaurantSale(chatId, data, message, env) {
   
   // Write new restaurant rows
   if (newRows.length > 0) {
-    await enqueueBatchWrite(newRows, 'raw', env);
-    await flushPendingWrites(env);
+    await writeRowsToSheet(newRows, env);
   }
   
-  await sendTelegram(chatId, `✅ ${message}`, env);
+  if (!silent) await sendTelegram(chatId, `✅ ${message}`, env);
 }
 
-async function executeExcess(chatId, data, message, env) {
+async function executeExcess(chatId, data, message, env, silent = false) {
   const oggi = new Date().toLocaleDateString('it-IT');
   
   const sa = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
@@ -864,7 +887,7 @@ async function executeExcess(chatId, data, message, env) {
   }
   
   if (updates.length === 0) {
-    await sendTelegram(chatId, `⚠️ Nessuna riga trovata per oggi. Registra prima gli acquisti.`, env);
+    if (!silent) await sendTelegram(chatId, `⚠️ Nessuna riga trovata per oggi. Registra prima gli acquisti.`, env);
     return;
   }
   
@@ -877,10 +900,10 @@ async function executeExcess(chatId, data, message, env) {
     }
   );
   
-  await sendTelegram(chatId, `✅ ${message}`, env);
+  if (!silent) await sendTelegram(chatId, `✅ ${message}`, env);
 }
 
-async function executeDeletion(chatId, data, message, env) {
+async function executeDeletion(chatId, data, message, env, silent = false) {
   // PRIMARY KEY: (data, pescheria, pesce)
   const targetData = data.data;
   const targetPescheria = data.pescheria;
@@ -915,7 +938,7 @@ async function executeDeletion(chatId, data, message, env) {
   }
   
   if (rowToDelete === -1) {
-    await sendTelegram(chatId, 
+    if (!silent) await sendTelegram(chatId, 
       `⚠️ Entry non trovata!\nData: ${targetData}\nPescheria: ${targetPescheria}\nPesce: ${data.pesce}\n\nVerifica i dati.`, env);
     return;
   }
@@ -951,10 +974,10 @@ async function executeDeletion(chatId, data, message, env) {
     }
   );
   
-  await sendTelegram(chatId, `✅ ${message}\n\nCancellata entry: ${targetData} | ${targetPescheria} | ${data.pesce}`, env);
+  if (!silent) await sendTelegram(chatId, `✅ ${message}\n\nCancellata entry: ${targetData} | ${targetPescheria} | ${data.pesce}`, env);
 }
 
-async function executeBulkDeletion(chatId, data, message, env) {
+async function executeBulkDeletion(chatId, data, message, env, silent = false) {
   // Bulk deletion: delete all rows or all rows of specific date
   const sa = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
   const token = await getGoogleToken(sa);
@@ -973,7 +996,7 @@ async function executeBulkDeletion(chatId, data, message, env) {
   const allRows = sheetData.values || [];
   
   if (allRows.length <= 1) {
-    await sendTelegram(chatId, `⚠️ Nessuna riga da cancellare (solo header presente).`, env);
+    if (!silent) await sendTelegram(chatId, `⚠️ Nessuna riga da cancellare (solo header presente).`, env);
     return;
   }
   
@@ -1008,7 +1031,7 @@ async function executeBulkDeletion(chatId, data, message, env) {
   }
   
   if (rowsToDelete.length === 0) {
-    await sendTelegram(chatId, `⚠️ Nessuna riga trovata con i criteri specificati.`, env);
+    if (!silent) await sendTelegram(chatId, `⚠️ Nessuna riga trovata con i criteri specificati.`, env);
     return;
   }
   
@@ -1041,10 +1064,10 @@ async function executeBulkDeletion(chatId, data, message, env) {
     ? `Cancellate TUTTE le ${rowsToDelete.length} righe (tranne header)`
     : `Cancellate ${rowsToDelete.length} righe del ${data.data}`;
   
-  await sendTelegram(chatId, `✅ ${message}\n\n${summary}`, env);
+  if (!silent) await sendTelegram(chatId, `✅ ${message}\n\n${summary}`, env);
 }
 
-async function executeUpdate(chatId, data, message, env) {
+async function executeUpdate(chatId, data, message, env, silent = false) {
   // Simple executor: Claude already validated everything
   // Just execute what Claude decided
   
@@ -1129,7 +1152,7 @@ async function executeUpdate(chatId, data, message, env) {
       );
     }
     
-    await sendTelegram(chatId, `✅ ${message}`, env);
+    if (!silent) await sendTelegram(chatId, `✅ ${message}`, env);
     return;
   }
   
@@ -1186,7 +1209,7 @@ async function executeUpdate(chatId, data, message, env) {
     );
   }
   
-  await sendTelegram(chatId, `✅ ${message}`, env);
+  if (!silent) await sendTelegram(chatId, `✅ ${message}`, env);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1301,40 +1324,6 @@ Rispondi SOLO con la data in formato DD/MM/YYYY, nient'altro.`;
 // ══════════════════════════════════════════════════════════════
 // GOOGLE SHEETS FUNCTIONS
 // ══════════════════════════════════════════════════════════════
-
-async function enqueueBatchWrite(items, type, env) {
-  const raw = await env.SESSIONS.get('__pendingWrites__');
-  const pending = raw ? JSON.parse(raw) : [];
-
-  if (type === 'acquisto') {
-    for (const item of items) {
-      const scarto = getWastePerKg(item.specie);
-      pending.push([
-        item.data_acquisto, item.pescheria, item.specie, item.fornitore,
-        item.categoria, item.kg, item.prezzo_acquisto, item.prezzo_vendita,
-        '', '', '', item.meteo, '', scarto,
-      ]);
-    }
-  } else {
-    pending.push(...items);
-  }
-
-  if (pending.length >= BATCH_THRESHOLD) {
-    await writeRowsToSheet(pending, env);
-    await env.SESSIONS.delete('__pendingWrites__');
-  } else {
-    await env.SESSIONS.put('__pendingWrites__', JSON.stringify(pending), { expirationTtl: 86400 });
-  }
-}
-
-async function flushPendingWrites(env) {
-  const raw = await env.SESSIONS.get('__pendingWrites__');
-  if (!raw) return;
-  const pending = JSON.parse(raw);
-  if (!pending.length) return;
-  await writeRowsToSheet(pending, env);
-  await env.SESSIONS.delete('__pendingWrites__');
-}
 
 async function writeRowsToSheet(rows, env) {
   const sa = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
@@ -1559,21 +1548,24 @@ async function buildReport(env, targetDate = null) {
     const pa = parseNum(r[6]);
     const pv = parseNum(r[7]);
     const rim = parseNum(r[8]);
+    const scartoPerKg = parseNum(r[13]);
     const key = `${pesce}|${categoria}|${pa}|${pv}`;
     
     if (!consolidated[key]) {
-      consolidated[key] = { pesce, categoria, kg: 0, pa, pv, rim: 0 };
+      consolidated[key] = { pesce, categoria, kg: 0, pa, pv, rim: 0, scartoPerKg };
     }
     consolidated[key].kg += kg;
     consolidated[key].rim += rim;
   });
 
-  let totKg = 0, totSpesa = 0, totIncassoLordo = 0, totIncassoNetto = 0;
+  let totKg = 0, totSpesa = 0, totIncassoLordo = 0, totIncassoNetto = 0, totScarto = 0;
   const fishDetails = [];
 
   Object.values(consolidated).forEach(f => {
+    const scartoKg = f.kg * f.scartoPerKg;
+    const kgVendibili = f.kg - f.rim - scartoKg;
     const spesa = f.kg * f.pa;
-    const incassoLordo = f.kg * f.pv;
+    const incassoLordo = Math.max(0, kgVendibili) * f.pv;
     const margineEuro = incassoLordo - spesa;
     const marginePerc = incassoLordo > 0 ? (margineEuro / incassoLordo * 100) : 0;
     
@@ -1581,62 +1573,31 @@ async function buildReport(env, targetDate = null) {
     totSpesa += spesa;
     totIncassoLordo += incassoLordo;
     totIncassoNetto += margineEuro;
+    totScarto += scartoKg;
     
-    fishDetails.push({ ...f, margineEuro, marginePerc });
+    fishDetails.push({ ...f, scartoKg, kgVendibili, margineEuro, marginePerc });
   });
 
-  const lines = fishDetails.map(f => 
-    `🐟 *${f.pesce}* (${f.categoria})\n` +
-    `   ${f.kg}kg | €${f.pa.toFixed(2)}/kg → €${f.pv.toFixed(2)}/kg\n` +
-    `   Margine: €${f.margineEuro.toFixed(2)} (${f.marginePerc.toFixed(1)}%)${f.rim ? ` | Rim: ${f.rim}kg` : ''}`
-  );
+  const lines = fishDetails.map(f => {
+    let line = `🐟 *${f.pesce}* (${f.categoria})\n` +
+      `   ${f.kg}kg | €${f.pa.toFixed(2)}/kg → €${f.pv.toFixed(2)}/kg\n` +
+      `   Margine: €${f.margineEuro.toFixed(2)} (${f.marginePerc.toFixed(1)}%)`;
+    if (f.rim) line += ` | Rim: ${f.rim}kg`;
+    if (f.scartoKg > 0) line += ` | Scarto: ${f.scartoKg.toFixed(2)}kg`;
+    return line;
+  });
 
   const totMarginePerc = totIncassoLordo > 0 ? (totIncassoNetto / totIncassoLordo * 100) : 0;
 
   return `📊 *Report ${reportDate}*\n\n` +
     `${lines.join('\n\n')}\n\n` +
     `━━━━━━━━━━━━━━━━━━━━\n` +
-    `📦 Totale: *${totKg.toFixed(1)}kg*\n` +
+    `📦 Totale: *${totKg.toFixed(1)}kg*` + (totScarto > 0 ? ` (scarto: ${totScarto.toFixed(2)}kg)` : '') + `\n` +
     `💶 Capitale speso: *€${totSpesa.toFixed(2)}*\n` +
     `💰 Incasso lordo previsto: *€${totIncassoLordo.toFixed(2)}*\n` +
     `✅ Incasso netto previsto: *€${totIncassoNetto.toFixed(2)}*\n` +
     `📈 Margine totale: *${totMarginePerc.toFixed(1)}%*\n\n` +
     `_Esclusi: benzine e sigarette (bonus aziendale)_`;
-}
-
-async function checkRemainderReminder(env) {
-  const now = new Date();
-  if (now.getUTCHours() !== REMINDER_HOUR_UTC) return;
-  const key = `__reminder__${now.toISOString().slice(0, 13)}`;
-  const already = await env.SESSIONS.get(key);
-  if (already) return;
-  await env.SESSIONS.put(key, '1', { expirationTtl: 3600 });
-
-  const chatIds = await getActiveChatIds(env);
-  for (const chatId of chatIds) {
-    await sendTelegram(chatId,
-      `🕐 *Sono le 13:00 — Riepilogo giornata*\n\n` +
-      `Dimmi se hai:\n` +
-      `• Vendite a ristoranti (Brigante)\n` +
-      `• Rimanenze da spostare a domani\n` +
-      `• Richieste in eccesso non soddisfatte\n\n` +
-      `Oppure scrivi /report per il riepilogo.`, env);
-  }
-}
-
-async function getActiveChatIds(env) {
-  try {
-    const raw = await env.SESSIONS.get('__activeChatIds__');
-    return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
-}
-
-async function addActiveChatId(chatId, env) {
-  const ids = await getActiveChatIds(env);
-  if (!ids.includes(chatId)) {
-    ids.push(chatId);
-    await env.SESSIONS.put('__activeChatIds__', JSON.stringify(ids), { expirationTtl: 86400 });
-  }
 }
 
 // ══════════════════════════════════════════════════════════════

@@ -13,9 +13,6 @@
       "id": "9809fcdaf00944e88dbbeb6a6597abc5"
     }
   ],
-	"triggers": {
-		"crons": ["0 11 * * *"]
-	},
 	"observability": {
 		"enabled": true
 	},
