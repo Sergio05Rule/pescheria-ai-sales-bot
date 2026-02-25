@@ -355,7 +355,7 @@ async function callClaudeOrchestrator(messages, chatId, env) {
     contextSection += `\n\nSHEET NEXT 20 DAYS:\n${futureLines}`;
   }
 
-  const systemPrompt = `Pescheria Abascia assistant. Today: ${oggiLong}. Speak Italian.
+  const staticPrompt = `Pescheria Abascia assistant. Today: ${oggiLong}. Speak Italian.
 STYLE: Be CONCISE. Short confirmations. No emojis in JSON messages. Max 1-2 sentences for questions/confirmations.
 
 SHEET COLS: A=Data B=Pescheria C=Pesce D=Fornitore E=Categoria F=Kg G=€Acq/kg H=€Vend/kg I=Rimanenza(kg spostati) J=Scartato K=Eccesso L=Meteo M=Note N=Scarto/kg. O-AB=formulas(don't touch).
@@ -409,7 +409,6 @@ ACTIONS:
   For date ranges, include ALL dates in the array.
 
 8.CONVERSAZIONE: greetings, questions → just respond, no JSON action
-${contextSection}
 
 RULES:
 - Normalize fish names: first letter uppercase, rest lowercase
@@ -434,17 +433,23 @@ Use "actions" array when user asks to update/delete/modify MULTIPLE rows in one 
 IMPORTANT: For ACQUISTO with multiple items (even from different suppliers), ALWAYS use a SINGLE action with items array, NOT an "actions" array of individual acquisto actions. The items array supports multiple suppliers in one action.
 If need more info → respond with text only (no JSON).`;
 
+  const dynamicContext = contextSection;
+
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01'
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'prompt-caching-2024-07-31'
     },
     body: JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 2048,
-      system: systemPrompt,
+      system: [
+        { type: 'text', text: staticPrompt, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: dynamicContext }
+      ],
       messages
     })
   });

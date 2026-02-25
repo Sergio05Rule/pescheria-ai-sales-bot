@@ -17,7 +17,7 @@ AI-powered Telegram bot for fish shop inventory management — natural language 
 - **Single-Message Responses** — multi-item operations (purchases, updates, deletes) produce one consolidated message, not one per item
 - **Daily Session Reset** — conversation history resets each day, AI re-reads sheet fresh on first interaction
 - **Real-Time Writes** — all operations write directly to Google Sheets, no batching or queuing
-- **Cost Efficient** — ~$1/month with Claude Haiku 4.5
+- **Cost Efficient** — ~$1/month with Claude Haiku 4.5, further reduced by prompt caching
 
 ## 🏗️ Architecture
 
@@ -30,6 +30,7 @@ Claude Haiku 4.5 (Orchestrator)
   - Reads full sheet state (real-time)
   - Validates data
   - Decides action (single or multi)
+  - Prompt caching: static rules cached 5min, dynamic sheet context sent fresh
     ↓
 Simple Executor Functions (no business logic)
     ↓
@@ -132,6 +133,7 @@ Cloudflare Workers, Google Sheets API, and Telegram Bot API are all free tier.
 8. **Concurrency lock, not dedup** — KV lock per chat drops all messages while one is processing; simpler and more robust than timestamp-based dedup
 9. **Reset session daily** — stale conversation history causes AI to hallucinate; daily reset keeps context aligned with real sheet state
 10. **Write directly, don't batch** — Google Sheets API is free; batching adds complexity for zero benefit
+11. **Prompt caching saves tokens** — static system prompt (rules, actions, formats) is cached for 5 minutes via Anthropic's prompt caching; only the dynamic sheet context is sent fresh each call. During active sessions (multiple messages within 5 min), cached input tokens cost 90% less
 
 ## 🔮 Next Steps
 
