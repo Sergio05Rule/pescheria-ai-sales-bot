@@ -39,7 +39,7 @@ const FISH_CATEGORY = {
 // ── Configuration ────────────────────────────────────────────
 const SESSION_TTL = 7200;
 const MAX_HISTORY = 20;
-const AUTHORIZED_USERS = [449768582, 5041769858];
+const AUTHORIZED_USERS = [449768582, 5041769858, 752410978];
 
 // ── Entry Point ──────────────────────────────────────────────
 export default {
