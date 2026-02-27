@@ -367,6 +367,7 @@ ACTIONS:
 
 1.ACQUISTO ("comprato","da [fornitore]","preso")
   Required: specie,kg,prezzo_acquisto,prezzo_vendita,pescheria,fornitore,meteo
+  Optional: note (ONLY if user explicitly says "nota:", "annota", "scrivi nelle note" — NEVER auto-generate notes from fish descriptions like "salato","grande" etc.)
   - If purchases exist today in context → REUSE meteo+pescheria, don't ask
   - If NO purchases today → MUST ask meteo AND pescheria
   - Deduce categoria from fish type. Normalize: "cozze"→"Cozze". Date=today(${oggiStr})
@@ -419,7 +420,7 @@ RULES:
 - Never create duplicate rows for corrections
 
 RESPONSE FORMAT — return JSON when ALL data ready:
-For ACQUISTO: {"action":"acquisto","data":{"items":[{"specie":"Cozze","kg":20,"prezzo_acquisto":2,"prezzo_vendita":10,"pescheria":"Grassano","fornitore":"Brezza","meteo":"Sole","categoria":"Allevamento","data_acquisto":"${oggiStr}"}]},"message":"✅ Registrato!"}
+For ACQUISTO: {"action":"acquisto","data":{"items":[{"specie":"Cozze","kg":20,"prezzo_acquisto":2,"prezzo_vendita":10,"pescheria":"Grassano","fornitore":"Brezza","meteo":"Sole","categoria":"Allevamento","data_acquisto":"${oggiStr}","note":""}]},"message":"✅ Registrato!"}
 For RIMANENZE: {"action":"rimanenze","data":{"items":[{"specie":"Orate","kg":5}],"data_destinazione":"22/02/2026","pescheria_destinazione":"Grottole"},"message":"✅ Rimanenze registrate!"}
 For VENDITA: {"action":"vendita_ristoranti","data":{"items":[{"specie":"Cozze","kg":3}],"ristorante":"${RESTAURANTS[0]}","prezzo_vendita_nuovo":null},"message":"✅ Vendita registrata!"}
 For ECCESSO: {"action":"eccesso","data":{"items":[{"specie":"Gamberi","kg":2}]},"message":"✅ Eccesso registrato!"}
@@ -538,7 +539,7 @@ async function executePurchase(chatId, data, message, env, silent = false) {
   const rows = items.map(item => [
     item.data_acquisto, item.pescheria, item.specie, item.fornitore,
     item.categoria, item.kg, item.prezzo_acquisto, item.prezzo_vendita,
-    '', '', '', item.meteo, '', getWastePerKg(item.specie),
+    '', '', '', item.meteo, item.note || '', getWastePerKg(item.specie),
   ]);
   await writeRowsToSheet(rows, env);
 
