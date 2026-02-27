@@ -295,7 +295,7 @@ async function callClaudeOrchestrator(messages, chatId, env) {
     const fishAvail = {};
     todayRows.forEach(r => {
       const fish = r[2];
-      const kg = parseFloat(r[5]) || 0;
+      const kg = parseNum(r[5]);
       if (!fishAvail[fish]) fishAvail[fish] = { pescherie: 0, ristoranti: 0 };
       if (FISH_SHOPS.includes(r[1])) fishAvail[fish].pescherie += kg;
       if (RESTAURANTS.includes(r[1])) fishAvail[fish].ristoranti += kg;
@@ -608,10 +608,10 @@ async function executeRemainders(chatId, data, message, env, silent = false) {
         specieOriginale: r[2] || '',
         fornitore: r[3] || '',
         categoria: r[4] || '',
-        prezzo_acquisto: parseFloat(r[6]) || 0,
-        prezzo_vendita: parseFloat(r[7]) || 0,
+        prezzo_acquisto: parseNum(r[6]),
+        prezzo_vendita: parseNum(r[7]),
         meteo: r[11] || '',
-        scarto: parseFloat(r[13]) || 0
+        scarto: parseNum(r[13])
       };
     }
   });
@@ -712,7 +712,7 @@ async function executeRestaurantSale(chatId, data, message, env, silent = false)
           normalize(row[2] || '') === specieNorm &&
           row[0] >= domani) {
         
-        const kgRimanenza = parseFloat(row[5]) || 0;
+        const kgRimanenza = parseNum(row[5]);
         if (kgRimanenza >= item.kg) {
           // Subtract from remainder: update col F (qty), leave col I as-is (stays 0)
           const rowNumber = i + 1;
@@ -730,7 +730,7 @@ async function executeRestaurantSale(chatId, data, message, env, silent = false)
                 normalize(origRow[2] || '') === specieNorm &&
                 origRow[3] !== 'Rimanenza' &&
                 !RESTAURANTS.includes(origRow[1])) {
-              const origI = parseFloat(origRow[8]) || 0;
+              const origI = parseNum(origRow[8]);
               if (origI > 0) {
                 updates.push({
                   range: `'${sheetName}'!I${j + 1}`,
@@ -752,7 +752,7 @@ async function executeRestaurantSale(chatId, data, message, env, silent = false)
           
           // Create restaurant row
           const prezzoVendita = data.prezzo_vendita_nuovo !== null && data.prezzo_vendita_nuovo !== undefined 
-            ? data.prezzo_vendita_nuovo : parseFloat(row[7]);
+            ? data.prezzo_vendita_nuovo : parseNum(row[7]);
           newRows.push([
             oggi,                    // A - Date
             ristorante,              // B - Pescheria (restaurant name)
@@ -760,14 +760,14 @@ async function executeRestaurantSale(chatId, data, message, env, silent = false)
             row[3] || '',            // D - Supplier (KEEP ORIGINAL - "Rimanenza")
             row[4] || '',            // E - Category
             item.kg,                 // F - Qty
-            parseFloat(row[6]) || 0, // G - Purchase price
+            parseNum(row[6]),        // G - Purchase price
             prezzoVendita,           // H - Sale price
             '',                      // I - Remainder (empty for restaurant rows)
             '',                      // J - Discarded
             '',                      // K - Additional requests
             todayMeteo,              // L - Weather (from today, NOT from remainder row)
             `Vendita ristorante da rimanenza ${row[0]}`,  // M - Notes
-            parseFloat(row[13]) || 0 // N - Waste per Kg
+            parseNum(row[13])        // N - Waste per Kg
           ]);
           
           found = true;
@@ -794,7 +794,7 @@ async function executeRestaurantSale(chatId, data, message, env, silent = false)
             row[3] !== 'Rimanenza' &&
             !RESTAURANTS.includes(row[1])) {  // Exclude all restaurants
           
-          const kgOriginale = parseFloat(row[5]) || 0;
+          const kgOriginale = parseNum(row[5]);
           if (kgOriginale >= item.kg) {
             // Subtract from today
             const rowNumber = i + 1;
@@ -805,7 +805,7 @@ async function executeRestaurantSale(chatId, data, message, env, silent = false)
             
             // Create restaurant row
             const prezzoVendita = data.prezzo_vendita_nuovo !== null && data.prezzo_vendita_nuovo !== undefined
-              ? data.prezzo_vendita_nuovo : parseFloat(row[7]);
+              ? data.prezzo_vendita_nuovo : parseNum(row[7]);
             newRows.push([
               oggi,                    // A - Date
               ristorante,              // B - Pescheria (restaurant name)
@@ -813,14 +813,14 @@ async function executeRestaurantSale(chatId, data, message, env, silent = false)
               row[3] || '',            // D - Supplier (KEEP ORIGINAL!)
               row[4] || '',            // E - Category
               item.kg,                 // F - Qty
-              parseFloat(row[6]) || 0, // G - Purchase price
+              parseNum(row[6]),        // G - Purchase price
               prezzoVendita,           // H - Sale price
               '',                      // I - Remainder (empty for restaurant rows)
               '',                      // J - Discarded
               '',                      // K - Additional requests
               todayMeteo,              // L - Weather (always from today)
               `Vendita ristorante da ${row[1]}`,  // M - Notes
-              parseFloat(row[13]) || 0 // N - Waste per Kg
+              parseNum(row[13])        // N - Waste per Kg
             ]);
             
             found = true;
