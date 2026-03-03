@@ -291,18 +291,23 @@ async function callClaudeOrchestrator(messages, chatId, env) {
     const todayMeteo = firstPurchase?.[11] || '';
     const todayPescheria = firstPurchase?.[1] || '';
     
-    // Fish availability summary
+    // Fish availability summary (includes remainders as inventory)
     const fishAvail = {};
     todayRows.forEach(r => {
       const fish = r[2];
       const kg = parseNum(r[5]);
-      if (!fishAvail[fish]) fishAvail[fish] = { pescherie: 0, ristoranti: 0 };
-      if (FISH_SHOPS.includes(r[1])) fishAvail[fish].pescherie += kg;
+      const rim = parseNum(r[8]);
+      if (!fishAvail[fish]) fishAvail[fish] = { pescherie: 0, ristoranti: 0, rimMarked: 0 };
+      if (FISH_SHOPS.includes(r[1])) {
+        fishAvail[fish].pescherie += kg;
+        fishAvail[fish].rimMarked += rim;
+      }
       if (RESTAURANTS.includes(r[1])) fishAvail[fish].ristoranti += kg;
     });
-    const availSummary = Object.entries(fishAvail).map(([f, d]) => 
-      `${f}:${d.pescherie}kg pesc,${d.ristoranti}kg rist→disp:${d.pescherie - d.ristoranti}kg`
-    ).join(' | ');
+    const availSummary = Object.entries(fishAvail).map(([f, d]) => {
+      const disp = d.pescherie - d.ristoranti - d.rimMarked;
+      return `${f}:${d.pescherie}kg inv,${d.ristoranti}kg rist,${d.rimMarked}kg rim→disp:${disp}kg`;
+    }).join(' | ');
     
     contextSection = `\n\nSHEET TODAY (${oggiStr}):\n${todayTable}\nAVAILABLE: ${availSummary}\nMeteo=${todayMeteo||'NOT SET'} Pescheria=${todayPescheria||'NOT SET'}`;
     if (hasPurchasesToday) {
@@ -314,7 +319,7 @@ async function callClaudeOrchestrator(messages, chatId, env) {
   
   // Future remainders (raw rows)
   const futureRows = allSheetRows.filter((r, i) => 
-    i > 0 && r[3] === 'Rimanenza' && r[0] > oggiStr
+    i > 0 && r[3] === 'Rimanenza' && isDateAfter(r[0], oggiStr)
   );
   if (futureRows.length > 0) {
     const futureTable = futureRows.map(r => 
@@ -374,12 +379,13 @@ ACTIONS:
   - Ask ONLY for missing prices, deduce everything else
 
 2.RIMANENZE ("rimaste","avanzato","rimanenze")
-  STEP 1 PRE-CHECK: is fish in today's pescherie purchases in context? No→reject immediately: "⚠️ [Pesce] non trovato negli acquisti di oggi."
-  STEP 2 VALIDATE: requested kg ≤ available (purchased - sold to restaurants, shown in context as "disponibile per rimanenze")
+  STEP 1 PRE-CHECK: is fish in today's INVENTORY (purchases OR remainders from previous days)? No→reject: "⚠️ [Pesce] non trovato nell'inventario di oggi."
+  STEP 2 VALIDATE: requested kg ≤ available (total inventory - already marked as remainder in col I - sold to restaurants)
   STEP 3 ASK: destination date (default=tomorrow, Monday if Friday) AND destination pescheria
   PESCHERIA LOGIC: Pescherie are usually ALTERNATED day by day. If today is Grassano, suggest Grottole for tomorrow (and vice versa). Ask user to confirm: "Di solito si alterna: oggi ${'{'}pescheria{'}'}, domani suggerisco ${'{'}altra{'}'}. Va bene?"
   Remainders ONLY from pescherie, NEVER from restaurants.
-  The function handles: OLD row col I = kg moved, NEW row col I = 0, meteo auto-copied.
+  FIFO: function subtracts from remainder rows first (older stock), then new purchases.
+  The function handles: source rows col I update, NEW row col I = 0, meteo auto-copied.
 
 3.VENDITA_RISTORANTI ("venduto a [rist]","dato al ristorante")
   ${RESTAURANTS.length === 1 ? `Only 1 restaurant (${RESTAURANTS[0]}), use automatically, don't ask` : 'Multiple restaurants: ask which one'}
@@ -563,93 +569,113 @@ async function executePurchase(chatId, data, message, env, silent = false) {
 
 async function executeRemainders(chatId, data, message, env, silent = false) {
   const oggi = new Date().toLocaleDateString('it-IT');
-  
+
   // Parse flexible date if needed
   let dataDestinazione = data.data_destinazione;
   if (!/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(dataDestinazione)) {
     dataDestinazione = await parseFlexibleDate(dataDestinazione, env) || dataDestinazione;
   }
 
-  // Simple executor: Claude already validated everything
-  // Just get today's data to copy prices/category/scarto and update remainder column
   const sa = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
   const token = await getGoogleToken(sa);
   const sheetName = env.SHEET_NAME || 'AIPescheriaBot';
   const sheetId = env.SHEET_ID;
   const range = encodeURIComponent(`'${sheetName}'!A:N`);
-  
+
   const res = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}`,
     { headers: { 'Authorization': `Bearer ${token}` } }
   );
-  
+
   if (!res.ok) throw new Error(`Sheets GET ${res.status}`);
   const sheetData = await res.json();
   const allRows = sheetData.values || [];
-  
-  // Find today's purchases from pescherie (to copy data and update remainder column)
-  const todayPescheriePurchases = allRows.filter((r, idx) => 
-    idx > 0 && 
-    r[0] === oggi && 
-    r[3] !== 'Rimanenza' && 
-    !RESTAURANTS.includes(r[1]) &&  // Exclude all restaurants
-    FISH_SHOPS.includes(r[1]) &&    // Only pescherie
-    r[5]
+
+  // Find today's FULL inventory: remainders + new purchases (pescherie only, no restaurants)
+  const todayInventory = allRows.map((r, idx) => ({ row: r, idx })).filter(({ row, idx }) =>
+    idx > 0 &&
+    row[0] === oggi &&
+    !RESTAURANTS.includes(row[1]) &&
+    FISH_SHOPS.includes(row[1]) &&
+    row[5]
   );
 
-  // Build map: normalized species → original purchase data + row number
-  const acquisti = {};
-  todayPescheriePurchases.forEach((r) => {
-    const specie = normalize(r[2] || '');
-    const rowNumber = allRows.indexOf(r) + 1; // 1-based
-    
-    if (!acquisti[specie]) {
-      acquisti[specie] = {
-        rowNumber,
-        specieOriginale: r[2] || '',
-        fornitore: r[3] || '',
-        categoria: r[4] || '',
-        prezzo_acquisto: parseNum(r[6]),
-        prezzo_vendita: parseNum(r[7]),
-        meteo: r[11] || '',
-        scarto: parseNum(r[13])
-      };
-    }
+  // Build inventory map per species: array of source rows, remainders first (FIFO)
+  const inventory = {};
+  todayInventory.forEach(({ row, idx }) => {
+    const specie = normalize(row[2] || '');
+    if (!inventory[specie]) inventory[specie] = [];
+    inventory[specie].push({
+      rowNumber: idx + 1, // 1-based
+      isRemainder: row[3] === 'Rimanenza',
+      specieOriginale: row[2] || '',
+      categoria: row[4] || '',
+      kg: parseNum(row[5]),
+      currentRim: parseNum(row[8]),
+      prezzo_acquisto: parseNum(row[6]),
+      prezzo_vendita: parseNum(row[7]),
+      meteo: row[11] || '',
+      scarto: parseNum(row[13])
+    });
   });
+  // Sort: remainders first (FIFO — older stock goes first)
+  Object.values(inventory).forEach(arr =>
+    arr.sort((a, b) => (a.isRemainder ? 0 : 1) - (b.isRemainder ? 0 : 1))
+  );
 
-  // Build rows for destination date AND update today's rows
   const newRows = [];
   const updates = [];
-  
+
   for (const item of data.items) {
     const specieNorm = normalize(item.specie);
-    const originalData = acquisti[specieNorm];
-    
-    if (!originalData) {
-      if (!silent) await sendTelegram(chatId, `⚠️ ${item.specie} non trovato negli acquisti di pescherie oggi. Ignoro.`, env);
+    const sources = inventory[specieNorm];
+
+    if (!sources || sources.length === 0) {
+      if (!silent) await sendTelegram(chatId, `⚠️ ${item.specie} non trovato nell'inventario di oggi. Ignoro.`, env);
       continue;
     }
-    
-    // Update OLD ROW (today): set remainder column to kg being moved
-    updates.push({
-      range: `'${sheetName}'!I${originalData.rowNumber}`,
-      values: [[item.kg]]
-    });
-    
-    // Create NEW ROW (destination date): remainder column = 0
+
+    // FIFO: distribute remainder kg across source rows (remainders first, then purchases)
+    let kgRemaining = item.kg;
+    const refData = sources[0]; // Use first source for prices/category in new row
+
+    for (const src of sources) {
+      if (kgRemaining <= 0) break;
+      const available = src.kg - src.currentRim; // kg not yet marked as remainder
+      if (available <= 0) continue;
+
+      const take = Math.min(kgRemaining, available);
+      const newRimValue = src.currentRim + take;
+
+      updates.push({
+        range: `'${sheetName}'!I${src.rowNumber}`,
+        values: [[newRimValue]]
+      });
+      src.currentRim = newRimValue; // Track in-memory for multi-item
+      kgRemaining -= take;
+    }
+
+    if (kgRemaining > 0) {
+      if (!silent) await sendTelegram(chatId, `⚠️ ${item.specie}: solo ${(item.kg - kgRemaining).toFixed(2)}kg disponibili su ${item.kg}kg richiesti. Registro il disponibile.`, env);
+    }
+
+    const kgActual = item.kg - kgRemaining;
+    if (kgActual <= 0) continue;
+
+    // Create NEW ROW (destination date)
     newRows.push([
       dataDestinazione,
       data.pescheria_destinazione,
-      originalData.specieOriginale,  // Use original capitalization
+      refData.specieOriginale,
       'Rimanenza',
-      originalData.categoria,
-      item.kg,  // Qty Purchased = remainder kg
-      originalData.prezzo_acquisto,
-      originalData.prezzo_vendita,
+      refData.categoria,
+      kgActual,
+      refData.prezzo_acquisto,
+      refData.prezzo_vendita,
       0,  // Remainder = 0 (will be filled when actually remains)
-      '', '', '',  // Discarded, Additional requests, Weather (empty)
+      '', '', '',
       `Rimanenza da ${oggi}`,
-      originalData.scarto,
+      refData.scarto,
     ]);
   }
 
@@ -658,7 +684,7 @@ async function executeRemainders(chatId, data, message, env, silent = false) {
     return;
   }
 
-  // Apply updates to old rows
+  // Apply updates to source rows
   if (updates.length > 0) {
     await fetch(
       `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values:batchUpdate`,
@@ -678,165 +704,199 @@ async function executeRemainders(chatId, data, message, env, silent = false) {
 
 async function executeRestaurantSale(chatId, data, message, env, silent = false) {
   const oggi = new Date().toLocaleDateString('it-IT');
-  const domani = new Date(Date.now() + 86400000).toLocaleDateString('it-IT');
-  
+
   // Get restaurant name from data (Claude decided which one)
-  const ristorante = data.ristorante || RESTAURANTS[0];  // Default to first if not specified
-  
+  const ristorante = data.ristorante || RESTAURANTS[0];
+
   const sa = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
   const token = await getGoogleToken(sa);
   const sheetName = env.SHEET_NAME || 'AIPescheriaBot';
   const sheetId = env.SHEET_ID;
-  
-  // Read all rows to find source purchases and future remainders
+
+  // Read all rows
   const range = encodeURIComponent(`'${sheetName}'!A:N`);
   const res = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}`,
     { headers: { 'Authorization': `Bearer ${token}` } }
   );
-  
+
   if (!res.ok) throw new Error(`Sheets GET ${res.status}`);
   const sheetData = await res.json();
   const allRows = sheetData.values || [];
-  
-  const updates = [];
-  const newRows = [];
-  
-  for (const item of data.items) {
-    const specieNorm = normalize(item.specie);
-    let found = false;
-    
-    // First, check for future remainders
-    for (let i = 1; i < allRows.length; i++) {
-      const row = allRows[i];
-      if (row[3] === 'Rimanenza' && 
-          normalize(row[2] || '') === specieNorm &&
-          row[0] >= domani) {
-        
-        const kgRimanenza = parseNum(row[5]);
-        if (kgRimanenza >= item.kg) {
-          // Subtract from remainder: update col F (qty), leave col I as-is (stays 0)
-          const rowNumber = i + 1;
-          const newKg = kgRimanenza - item.kg;
-          updates.push({
-            range: `'${sheetName}'!F${rowNumber}`,
-            values: [[newKg]]
-          });
-          
-          // Also update col I of the ORIGINAL purchase row (the one that generated this remainder)
-          // Find it by looking at today's pescherie purchases for same fish
-          for (let j = 1; j < allRows.length; j++) {
-            const origRow = allRows[j];
-            if (origRow[0] === oggi && 
-                normalize(origRow[2] || '') === specieNorm &&
-                origRow[3] !== 'Rimanenza' &&
-                !RESTAURANTS.includes(origRow[1])) {
-              const origI = parseNum(origRow[8]);
-              if (origI > 0) {
-                updates.push({
-                  range: `'${sheetName}'!I${j + 1}`,
-                  values: [[Math.max(0, origI - item.kg)]]
-                });
-              }
-              break;
-            }
-          }
-          
-          // Get today's weather for the restaurant row
-          let todayMeteo = '';
-          for (let j = 1; j < allRows.length; j++) {
-            if (allRows[j][0] === oggi && allRows[j][11]) {
-              todayMeteo = allRows[j][11];
-              break;
-            }
-          }
-          
-          // Create restaurant row
-          const prezzoVendita = data.prezzo_vendita_nuovo !== null && data.prezzo_vendita_nuovo !== undefined 
-            ? data.prezzo_vendita_nuovo : parseNum(row[7]);
-          newRows.push([
-            oggi,                    // A - Date
-            ristorante,              // B - Pescheria (restaurant name)
-            row[2] || '',            // C - Fish
-            row[3] || '',            // D - Supplier (KEEP ORIGINAL - "Rimanenza")
-            row[4] || '',            // E - Category
-            item.kg,                 // F - Qty
-            parseNum(row[6]),        // G - Purchase price
-            prezzoVendita,           // H - Sale price
-            '',                      // I - Remainder (empty for restaurant rows)
-            '',                      // J - Discarded
-            '',                      // K - Additional requests
-            todayMeteo,              // L - Weather (from today, NOT from remainder row)
-            `Vendita ristorante da rimanenza ${row[0]}`,  // M - Notes
-            parseNum(row[13])        // N - Waste per Kg
-          ]);
-          
-          found = true;
-          break;
-        }
-      }
-    }
-    
-    // If not found in remainders, check today's purchases
-    if (!found) {
-      // Get today's weather
-      let todayMeteo = '';
-      for (let j = 1; j < allRows.length; j++) {
-        if (allRows[j][0] === oggi && allRows[j][11]) {
-          todayMeteo = allRows[j][11];
-          break;
-        }
-      }
-      
-      for (let i = 1; i < allRows.length; i++) {
-        const row = allRows[i];
-        if (row[0] === oggi && 
-            normalize(row[2] || '') === specieNorm &&
-            row[3] !== 'Rimanenza' &&
-            !RESTAURANTS.includes(row[1])) {  // Exclude all restaurants
-          
-          const kgOriginale = parseNum(row[5]);
-          if (kgOriginale >= item.kg) {
-            // Subtract from today
-            const rowNumber = i + 1;
-            updates.push({
-              range: `'${sheetName}'!F${rowNumber}`,
-              values: [[kgOriginale - item.kg]]
-            });
-            
-            // Create restaurant row
-            const prezzoVendita = data.prezzo_vendita_nuovo !== null && data.prezzo_vendita_nuovo !== undefined
-              ? data.prezzo_vendita_nuovo : parseNum(row[7]);
-            newRows.push([
-              oggi,                    // A - Date
-              ristorante,              // B - Pescheria (restaurant name)
-              row[2] || '',            // C - Fish
-              row[3] || '',            // D - Supplier (KEEP ORIGINAL!)
-              row[4] || '',            // E - Category
-              item.kg,                 // F - Qty
-              parseNum(row[6]),        // G - Purchase price
-              prezzoVendita,           // H - Sale price
-              '',                      // I - Remainder (empty for restaurant rows)
-              '',                      // J - Discarded
-              '',                      // K - Additional requests
-              todayMeteo,              // L - Weather (always from today)
-              `Vendita ristorante da ${row[1]}`,  // M - Notes
-              parseNum(row[13])        // N - Waste per Kg
-            ]);
-            
-            found = true;
-            break;
-          }
-        }
-      }
-    }
-    
-    if (!found) {
-      if (!silent) await sendTelegram(chatId, `⚠️ ${item.specie}: quantità non disponibile. Ignoro.`, env);
+
+  // Get today's weather once
+  let todayMeteo = '';
+  for (let j = 1; j < allRows.length; j++) {
+    if (allRows[j][0] === oggi && allRows[j][11]) {
+      todayMeteo = allRows[j][11];
+      break;
     }
   }
-  
-  // Apply updates
+
+  // Build unified inventory: today's pescherie rows + future remainder rows
+  // Each source tracks its sheet position and current state for in-memory mutation
+  const inventoryBySpecies = {};
+
+  for (let i = 1; i < allRows.length; i++) {
+    const row = allRows[i];
+    const specie = normalize(row[2] || '');
+    if (!specie) continue;
+
+    const isTodayPescheria = row[0] === oggi &&
+      !RESTAURANTS.includes(row[1]) &&
+      FISH_SHOPS.includes(row[1]);
+    const isFutureRemainder = row[3] === 'Rimanenza' && isDateAfter(row[0], oggi);
+
+    if (!isTodayPescheria && !isFutureRemainder) continue;
+
+    if (!inventoryBySpecies[specie]) inventoryBySpecies[specie] = [];
+    inventoryBySpecies[specie].push({
+      rowIndex: i,
+      rowNumber: i + 1, // 1-based for Sheets API
+      date: row[0],
+      location: row[1] || '',
+      specieOriginale: row[2] || '',
+      supplier: row[3] || '',
+      category: row[4] || '',
+      kg: parseNum(row[5]),
+      prezzoAcquisto: parseNum(row[6]),
+      prezzoVendita: parseNum(row[7]),
+      colI: parseNum(row[8]),
+      meteo: row[11] || '',
+      scarto: parseNum(row[13]),
+      isFutureRemainder,
+      isRemainder: row[3] === 'Rimanenza',
+    });
+  }
+
+  // Sort each species: future remainders first, then today's remainders, then today's purchases (FIFO)
+  Object.values(inventoryBySpecies).forEach(arr =>
+    arr.sort((a, b) => {
+      if (a.isFutureRemainder !== b.isFutureRemainder) return a.isFutureRemainder ? -1 : 1;
+      if (a.isRemainder !== b.isRemainder) return a.isRemainder ? -1 : 1;
+      return 0;
+    })
+  );
+
+  const updates = [];
+  const newRows = [];
+
+  for (const item of data.items) {
+    const specieNorm = normalize(item.specie);
+    const sources = inventoryBySpecies[specieNorm];
+
+    if (!sources || sources.length === 0) {
+      if (!silent) await sendTelegram(chatId, `⚠️ ${item.specie}: quantità non disponibile. Ignoro.`, env);
+      continue;
+    }
+
+    // FIFO distribution across all source rows
+    let kgRemaining = item.kg;
+    const consumed = []; // track what we took from each source
+
+    for (const src of sources) {
+      if (kgRemaining <= 0) break;
+
+      const available = src.kg; // full qty available in this row
+      if (available <= 0) continue;
+
+      const take = Math.min(kgRemaining, available);
+      consumed.push({ src, take });
+
+      // Reduce source row col F in-memory
+      src.kg -= take;
+      updates.push({
+        range: `'${sheetName}'!F${src.rowNumber}`,
+        values: [[src.kg]]
+      });
+
+      if (src.isFutureRemainder) {
+        // Future remainder consumed — also reduce col I on the original purchase row that generated it
+        // Find today's pescherie rows for same fish and reduce their col I
+        let kgToReduceI = take;
+        const todaySources = (inventoryBySpecies[specieNorm] || []).filter(s => !s.isFutureRemainder);
+        for (const orig of todaySources) {
+          if (kgToReduceI <= 0) break;
+          if (orig.colI <= 0) continue;
+          const reduceBy = Math.min(kgToReduceI, orig.colI);
+          orig.colI -= reduceBy;
+          updates.push({
+            range: `'${sheetName}'!I${orig.rowNumber}`,
+            values: [[orig.colI]]
+          });
+          kgToReduceI -= reduceBy;
+        }
+      } else {
+        // Today's row — check if pre-booked remainders (col I) exceed new col F
+        if (src.colI > 0 && src.colI > src.kg) {
+          const oldColI = src.colI;
+          src.colI = Math.max(0, src.kg);
+          updates.push({
+            range: `'${sheetName}'!I${src.rowNumber}`,
+            values: [[src.colI]]
+          });
+          // Reduce the corresponding future remainder row(s) by the difference
+          const colIDiff = oldColI - src.colI;
+          let diffRemaining = colIDiff;
+          for (const futSrc of sources) {
+            if (diffRemaining <= 0) break;
+            if (!futSrc.isFutureRemainder) continue;
+            const reduceBy = Math.min(diffRemaining, futSrc.kg);
+            futSrc.kg -= reduceBy;
+            updates.push({
+              range: `'${sheetName}'!F${futSrc.rowNumber}`,
+              values: [[futSrc.kg]]
+            });
+            diffRemaining -= reduceBy;
+          }
+        }
+      }
+
+      kgRemaining -= take;
+    }
+
+    if (kgRemaining > 0 && consumed.length > 0) {
+      if (!silent) await sendTelegram(chatId, `⚠️ ${item.specie}: solo ${(item.kg - kgRemaining).toFixed(2)}kg disponibili su ${item.kg}kg richiesti. Registro il disponibile.`, env);
+    }
+
+    const kgActual = item.kg - kgRemaining;
+    if (kgActual <= 0) {
+      if (!silent) await sendTelegram(chatId, `⚠️ ${item.specie}: quantità non disponibile. Ignoro.`, env);
+      continue;
+    }
+
+    // Use first consumed source for reference data (prices, supplier, etc.)
+    const ref = consumed[0].src;
+    const prezzoVendita = data.prezzo_vendita_nuovo !== null && data.prezzo_vendita_nuovo !== undefined
+      ? data.prezzo_vendita_nuovo : ref.prezzoVendita;
+
+    // Build note describing sources
+    const notesParts = consumed.map(c =>
+      c.src.isFutureRemainder
+        ? `rimanenza ${c.src.date} (${c.take}kg)`
+        : `${c.src.location} (${c.take}kg)`
+    );
+    const noteText = `Vendita ristorante da ${notesParts.join(' + ')}`;
+
+    newRows.push([
+      oggi,                    // A - Date
+      ristorante,              // B - Restaurant name
+      ref.specieOriginale,     // C - Fish
+      ref.supplier,            // D - Supplier (from first source)
+      ref.category,            // E - Category
+      kgActual,                // F - Qty sold
+      ref.prezzoAcquisto,      // G - Purchase price
+      prezzoVendita,           // H - Sale price
+      '',                      // I - Remainder (empty for restaurant rows)
+      '',                      // J - Discarded
+      '',                      // K - Additional requests
+      todayMeteo,              // L - Weather
+      noteText,                // M - Notes
+      ref.scarto,              // N - Waste per Kg
+    ]);
+  }
+
+  // Apply all updates
   if (updates.length > 0) {
     await fetch(
       `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values:batchUpdate`,
@@ -847,12 +907,12 @@ async function executeRestaurantSale(chatId, data, message, env, silent = false)
       }
     );
   }
-  
+
   // Write new restaurant rows
   if (newRows.length > 0) {
     await writeRowsToSheet(newRows, env);
   }
-  
+
   if (!silent) await sendTelegram(chatId, `✅ ${message}`, env);
 }
 
@@ -1237,6 +1297,20 @@ function normalizeFishName(name) {
 
 function normalize(str) {
   return str.toLowerCase().replace(/[^a-z0-9àèéìòù]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Compare Italian date strings (DD/MM/YYYY) correctly — string comparison fails for day/month ≥10
+function parseDateIt(dateStr) {
+  const parts = (dateStr || '').split('/');
+  if (parts.length !== 3) return null;
+  return new Date(parts[2], parts[1] - 1, parts[0]);
+}
+
+function isDateAfter(dateStr, refStr) {
+  const d = parseDateIt(dateStr);
+  const r = parseDateIt(refStr);
+  if (!d || !r) return false;
+  return d.getTime() > r.getTime();
 }
 
 function findClosestMatch(input, lista) {

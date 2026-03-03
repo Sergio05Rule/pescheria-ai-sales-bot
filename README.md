@@ -6,8 +6,8 @@ AI-powered Telegram bot for fish shop inventory management — natural language 
 
 - **Natural Language Input** — speak Italian naturally, AI understands intent and extracts data
 - **Purchase Registration** — auto-deduces category, reuses weather/pescheria from same day
-- **Remainder Management** — validates against available stock, suggests alternating pescheria
-- **Restaurant Sales** — subtracts from future remainders first, then today's stock
+- **Remainder Management** — validates against available stock (FIFO: remainder rows consumed first, then purchases), suggests alternating pescheria; remainders from previous days count as today's inventory
+- **Restaurant Sales** — if remainders have been declared (shop closed), takes from remainder stock first and auto-adjusts the future remainder row + col I; if no remainders yet (shop still open), takes from today's inventory. Supports multi-row FIFO distribution
 - **Excess Requests** — tracks unsatisfied demand, warns if inconsistent with remainders
 - **Updates & Deletes** — conversational corrections or explicit edits, single or bulk deletion
 - **Multi-Action Support** — AI can execute multiple operations in a single message (batch updates, deletes, etc.)
@@ -62,8 +62,8 @@ SHEET_NAME=AIPescheriaBot
 |----------|---------|
 | `callClaudeOrchestrator()` | Reads full sheet, builds context, calls Claude AI |
 | `executePurchase()` | Writes purchase rows to Sheet |
-| `executeRemainders()` | Updates old row col I + creates new remainder row |
-| `executeRestaurantSale()` | Subtracts from future remainders first, creates restaurant row |
+| `executeRemainders()` | FIFO distribution across inventory (remainder rows first, then purchases); updates col I + creates new remainder row |
+| `executeRestaurantSale()` | FIFO distribution: subtracts from future remainders → today's remainders → purchases; creates restaurant row |
 | `executeExcess()` | Updates excess requests column K |
 | `executeUpdate()` | Updates any field by PRIMARY KEY (data, pescheria, pesce) |
 | `executeDeletion()` | Deletes single row by PRIMARY KEY |
@@ -134,6 +134,8 @@ Cloudflare Workers, Google Sheets API, and Telegram Bot API are all free tier.
 9. **Reset session daily** — stale conversation history causes AI to hallucinate; daily reset keeps context aligned with real sheet state
 10. **Write directly, don't batch** — Google Sheets API is free; batching adds complexity for zero benefit
 11. **Prompt caching saves tokens** — static system prompt (rules, actions, formats) is cached for 5 minutes via Anthropic's prompt caching; only the dynamic sheet context is sent fresh each call. During active sessions (multiple messages within 5 min), cached input tokens cost 90% less
+12. **Never compare DD/MM/YYYY strings lexicographically** — `"10/3/2026" > "3/3/2026"` is `false` because `"1" < "3"`. Always parse to `Date` objects first. This bug silently broke future remainder detection for dates with day or month ≥ 10
+13. **FIFO distribution is mechanical, not decisional** — the AI validates availability and decides the action; executor functions handle the mechanical distribution across multiple rows. This is acceptable "plumbing logic" in dumb executors, not business logic
 
 ## 🔮 Next Steps
 
