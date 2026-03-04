@@ -1736,6 +1736,13 @@ async function buildReport(env, targetDate = null) {
     `📈 Margine totale: *${totMarginePerc.toFixed(1)}%*\n\n` +
     `_Esclusi: benzine e sigarette (bonus aziendale)_`;
 
+  // Future remainders: kg marked in col I of today's purchases (going to next day)
+  const totRimFutureKg = fishDetails.reduce((sum, f) => sum + f.rim, 0);
+  if (totRimFutureKg > 0) {
+    const totRimFutureValore = fishDetails.reduce((sum, f) => sum + (f.rim * f.pv), 0);
+    summary += `\n\n📦 Rimanenze future: *${totRimFutureKg.toFixed(1)}kg* — valore: *€${totRimFutureValore.toFixed(2)}*`;
+  }
+
   return summary;
 }
 
