@@ -663,6 +663,8 @@ async function executeRemainders(chatId, data, message, env, silent = false) {
     if (kgActual <= 0) continue;
 
     // Create NEW ROW (destination date)
+    // prezzo_acquisto = 0: fish was already paid on original purchase date,
+    // setting it to 0 prevents sheet formulas from double-counting the cost
     newRows.push([
       dataDestinazione,
       data.pescheria_destinazione,
@@ -670,7 +672,7 @@ async function executeRemainders(chatId, data, message, env, silent = false) {
       'Rimanenza',
       refData.categoria,
       kgActual,
-      refData.prezzo_acquisto,
+      0,  // Purchase price = 0 (already paid on original date)
       refData.prezzo_vendita,
       0,  // Remainder = 0 (will be filled when actually remains)
       '', '', '',
