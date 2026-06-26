@@ -1948,15 +1948,59 @@ function pemToBuffer(pem) {
 // ══════════════════════════════════════════════════════════════
 
 async function sendTelegram(chatId, text, env) {
-  const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: text,
-      parse_mode: 'Markdown',
-      disable_web_page_preview: true
-    })
-  });
-  if (!res.ok) console.error('Telegram error:', await res.text());
+  // Telegram hard-limits messages to 4096 chars. Split long messages into
+  // chunks (preferably on line boundaries) so confirmations/reports always arrive.
+  const TG_LIMIT = 4000; // leave margin below 4096
+  const chunks = splitForTelegram(text || '', TG_LIMIT);
+
+  for (const chunk of chunks) {
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: chunk,
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true
+      })
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error('Telegram error:', errText);
+      // Markdown parse errors can also cause 400s — retry once as plain text
+      if (errText.includes('can\'t parse entities') || errText.includes('parse')) {
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, text: chunk, disable_web_page_preview: true })
+        });
+      }
+    }
+  }
+}
+
+// Split text into chunks <= limit, breaking on line boundaries when possible.
+function splitForTelegram(text, limit) {
+  if (text.length <= limit) return [text];
+  const chunks = [];
+  const lines = text.split('\n');
+  let current = '';
+  for (const line of lines) {
+    // A single line longer than the limit: hard-split it
+    if (line.length > limit) {
+      if (current) { chunks.push(current); current = ''; }
+      for (let i = 0; i < line.length; i += limit) {
+        chunks.push(line.slice(i, i + limit));
+      }
+      continue;
+    }
+    if ((current + '\n' + line).length > limit) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current = current ? current + '\n' + line : line;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
 }
