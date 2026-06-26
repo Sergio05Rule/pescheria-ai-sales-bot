@@ -14,7 +14,7 @@ AI-powered Telegram bot for fish shop inventory management — natural language 
 - **Daily Reports** — restructured by supplier (total spend per supplier + fish list), then remainders section at the end; margins account for waste (scarto) on applicable fish
 - **Smart Validation** — AI checks all data against real sheet state before executing (today + next 20 days context)
 - **Double Message Protection** — concurrency lock in KV: while processing, all incoming messages are dropped with a "⏳" notification
-- **Single-Message Responses** — multi-item operations (purchases, updates, deletes) produce one consolidated message, not one per item
+- **Consolidated Responses** — multi-item operations produce one confirmation message (not one per item); for purchases, the daily report follows as a separate second message
 - **Oversized Message Guard** — if a message has too many items for the AI to process in one response (output hits the token ceiling), the bot detects the truncation and tells the user clearly that *nothing was saved* — split and retry. No silent failures.
 - **Daily Session Reset** — conversation history resets each day, AI re-reads sheet fresh on first interaction
 - **Real-Time Writes** — all operations write directly to Google Sheets, no batching or queuing

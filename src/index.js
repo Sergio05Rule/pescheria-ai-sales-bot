@@ -606,15 +606,15 @@ async function executePurchase(chatId, data, message, env, silent = false) {
   }
 
   if (!silent) {
-    // Send single confirmation with summary + report
-    let response = `✅ ${message}\n\n${formatSummary(items)}`;
+    // Message 1: confirmation + item summary
+    await sendTelegram(chatId, `✅ ${message}\n\n${formatSummary(items)}`, env);
+    // Message 2: daily report (always sent separately)
     try {
       const report = await buildReport(env);
-      response += `\n\n${report}`;
+      await sendTelegram(chatId, report, env);
     } catch (e) {
       console.error('Report error:', e);
     }
-    await sendTelegram(chatId, response, env);
   }
 }
 
