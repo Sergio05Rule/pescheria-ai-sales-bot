@@ -7,7 +7,7 @@
 
 // ── Master Data (extracted from historical data) ────────────
 const CATEGORIES = ['Allevamento', 'Mare', 'Decongelato', 'Congelato'];
-const SUPPLIERS = ['Brezza', 'Franco', 'Meridional', 'Ottavio', 'Pinuccio', 'Rimanenza'];
+const SUPPLIERS = ['Brezza', 'Franco', 'Meridional', 'Ottavio', 'Pinuccio', 'Pupo', 'Rimanenza'];
 const FISH_SHOPS = ['Grassano', 'Grottole'];
 const RESTAURANTS = ['Brigante'];
 const WEATHER = ['Sole', 'Nuvoloso', 'Pioggia', 'Neve'];
@@ -1614,7 +1614,7 @@ async function buildReport(env, targetDate = null) {
   if (!res.ok) throw new Error(await res.text());
   const data = await res.json();
 
-  // Split into purchases and remainders for this date
+  // Split into purchases (non-remainder) and remainder rows for this date
   const purchaseRows = (data.values || []).filter(r =>
     r[0] === reportDate && r[3] !== 'Rimanenza' && r[5]
   );
@@ -1626,9 +1626,11 @@ async function buildReport(env, targetDate = null) {
     return `📊 *Report ${reportDate}*\n\nNessun dato registrato.`;
   }
 
-  // Consolidate purchase rows (same fish, category, prices)
-  const consolidated = {};
+  // ── Group purchases by supplier ──────────────────────────────
+  // Each supplier has a map of consolidated fish entries
+  const byFornitore = {};
   purchaseRows.forEach(r => {
+    const fornitore = r[3] || 'Sconosciuto';
     const pesce = r[2] || '';
     const categoria = r[4] || '';
     const kg = parseNum(r[5]);
@@ -1637,100 +1639,107 @@ async function buildReport(env, targetDate = null) {
     const rim = parseNum(r[8]);
     const scartoPerKg = parseNum(r[13]);
     const key = `${pesce}|${categoria}|${pa}|${pv}`;
-    
-    if (!consolidated[key]) {
-      consolidated[key] = { pesce, categoria, kg: 0, pa, pv, rim: 0, scartoPerKg };
+
+    if (!byFornitore[fornitore]) byFornitore[fornitore] = {};
+    if (!byFornitore[fornitore][key]) {
+      byFornitore[fornitore][key] = { pesce, categoria, kg: 0, pa, pv, rim: 0, scartoPerKg };
     }
-    consolidated[key].kg += kg;
-    consolidated[key].rim += rim;
+    byFornitore[fornitore][key].kg += kg;
+    byFornitore[fornitore][key].rim += rim;
   });
 
-  // Consolidate remainder rows (same fish, category, prices)
+  // ── Consolidate remainder rows ────────────────────────────────
   const consolidatedRem = {};
   remainderRows.forEach(r => {
     const pesce = r[2] || '';
     const categoria = r[4] || '';
     const kg = parseNum(r[5]);
-    const pa = parseNum(r[6]);
     const pv = parseNum(r[7]);
     const scartoPerKg = parseNum(r[13]);
     const key = `${pesce}|${categoria}|${pv}`;
-    
     if (!consolidatedRem[key]) {
-      consolidatedRem[key] = { pesce, categoria, kg: 0, pa, pv, scartoPerKg };
+      consolidatedRem[key] = { pesce, categoria, kg: 0, pv, scartoPerKg };
     }
     consolidatedRem[key].kg += kg;
   });
 
-  // Calculate purchase totals
-  let totKg = 0, totSpesa = 0, totIncassoAcquisti = 0, totScarto = 0;
-  const fishDetails = [];
+  // ── Build report sections per supplier ───────────────────────
+  let totKgAll = 0, totSpesaAll = 0, totIncassoAll = 0, totScartoAll = 0;
+  const allFishDetails = []; // for future-remainder calculation
+  const supplierSections = [];
 
-  Object.values(consolidated).forEach(f => {
-    const scartoKg = f.kg * f.scartoPerKg;
-    const kgVendibili = f.kg - f.rim - scartoKg;
-    const spesa = f.kg * f.pa;
-    const incasso = Math.max(0, kgVendibili) * f.pv;
-    const margineEuro = incasso - spesa;
-    const marginePerc = incasso > 0 ? (margineEuro / incasso * 100) : 0;
-    
-    totKg += f.kg;
-    totSpesa += spesa;
-    totIncassoAcquisti += incasso;
-    totScarto += scartoKg;
-    
-    fishDetails.push({ ...f, scartoKg, kgVendibili, margineEuro, marginePerc });
-  });
+  for (const [fornitore, fishMap] of Object.entries(byFornitore)) {
+    let fornSpesa = 0, fornKg = 0;
+    const fishLines = [];
 
-  // Calculate remainder totals (no capital cost — already paid)
+    Object.values(fishMap).forEach(f => {
+      const scartoKg = f.kg * f.scartoPerKg;
+      const kgVendibili = f.kg - f.rim - scartoKg;
+      const spesa = f.kg * f.pa;
+      const incasso = Math.max(0, kgVendibili) * f.pv;
+      const margineEuro = incasso - spesa;
+      const marginePerc = incasso > 0 ? (margineEuro / incasso * 100) : 0;
+
+      fornSpesa += spesa;
+      fornKg += f.kg;
+      totKgAll += f.kg;
+      totSpesaAll += spesa;
+      totIncassoAll += incasso;
+      totScartoAll += scartoKg;
+      allFishDetails.push({ ...f, scartoKg, kgVendibili, margineEuro, marginePerc });
+
+      let line = `  🐟 *${f.pesce}* (${f.categoria})\n` +
+        `     ${f.kg}kg | €${f.pa.toFixed(2)}/kg → €${f.pv.toFixed(2)}/kg\n` +
+        `     Margine: €${margineEuro.toFixed(2)} (${marginePerc.toFixed(1)}%)`;
+      if (f.rim) line += ` | Rim: ${f.rim}kg`;
+      if (scartoKg > 0) line += ` | Scarto: ${scartoKg.toFixed(2)}kg`;
+      fishLines.push(line);
+    });
+
+    supplierSections.push(
+      `🏪 *${fornitore}* — Spesa: *€${fornSpesa.toFixed(2)}* (${fornKg.toFixed(1)}kg)\n` +
+      fishLines.join('\n')
+    );
+  }
+
+  // ── Remainder rows (arrived today from previous day) ─────────
   let totKgRim = 0, totIncassoRim = 0, totScartoRim = 0;
-  const remDetails = [];
+  const remLines = [];
 
   Object.values(consolidatedRem).forEach(f => {
     const scartoKg = f.kg * f.scartoPerKg;
     const kgVendibili = f.kg - scartoKg;
     const incasso = Math.max(0, kgVendibili) * f.pv;
-    
     totKgRim += f.kg;
     totIncassoRim += incasso;
     totScartoRim += scartoKg;
-    
-    remDetails.push({ ...f, scartoKg, kgVendibili, incasso });
+
+    let line = `  ♻️ *${f.pesce}* (${f.categoria})\n` +
+      `     ${f.kg}kg → €${f.pv.toFixed(2)}/kg\n` +
+      `     Incasso previsto: €${incasso.toFixed(2)}`;
+    if (scartoKg > 0) line += ` | Scarto: ${scartoKg.toFixed(2)}kg`;
+    remLines.push(line);
   });
 
-  // Build output lines — purchases
-  const lines = fishDetails.map(f => {
-    let line = `🐟 *${f.pesce}* (${f.categoria})\n` +
-      `   ${f.kg}kg | €${f.pa.toFixed(2)}/kg → €${f.pv.toFixed(2)}/kg\n` +
-      `   Margine: €${f.margineEuro.toFixed(2)} (${f.marginePerc.toFixed(1)}%)`;
-    if (f.rim) line += ` | Rim: ${f.rim}kg`;
-    if (f.scartoKg > 0) line += ` | Scarto: ${f.scartoKg.toFixed(2)}kg`;
-    return line;
-  });
-
-  // Build output lines — remainders
-  const remLines = remDetails.map(f => {
-    let line = `♻️ *${f.pesce}* (${f.categoria}) — Rimanenza\n` +
-      `   ${f.kg}kg → €${f.pv.toFixed(2)}/kg\n` +
-      `   Incasso previsto: €${f.incasso.toFixed(2)}`;
-    if (f.scartoKg > 0) line += ` | Scarto: ${f.scartoKg.toFixed(2)}kg`;
-    return line;
-  });
-
-  // Combined totals
-  const allLines = [...lines, ...remLines];
-  const totIncassoLordo = totIncassoAcquisti + totIncassoRim;
-  const totMargineNetto = totIncassoLordo - totSpesa;
+  // ── Assemble full report ──────────────────────────────────────
+  const totIncassoLordo = totIncassoAll + totIncassoRim;
+  const totMargineNetto = totIncassoLordo - totSpesaAll;
   const totMarginePerc = totIncassoLordo > 0 ? (totMargineNetto / totIncassoLordo * 100) : 0;
-  const allScarto = totScarto + totScartoRim;
+  const allScarto = totScartoAll + totScartoRim;
 
-  let summary = `📊 *Report ${reportDate}*\n\n` +
-    `${allLines.join('\n\n')}\n\n` +
-    `━━━━━━━━━━━━━━━━━━━━\n` +
-    `📦 Totale: *${(totKg + totKgRim).toFixed(1)}kg*`;
+  let summary = `📊 *Report ${reportDate}*\n\n`;
+  summary += supplierSections.join('\n\n');
+
+  if (remLines.length > 0) {
+    summary += `\n\n━━━━━━━━━━━━━━━━━━━━\n♻️ *Rimanenze di ieri*\n` +
+      remLines.join('\n');
+  }
+
+  summary += `\n\n━━━━━━━━━━━━━━━━━━━━\n`;
+  summary += `📦 Totale: *${(totKgAll + totKgRim).toFixed(1)}kg*`;
   if (totKgRim > 0) summary += ` (di cui ${totKgRim.toFixed(1)}kg rimanenze)`;
-  if (allScarto > 0) summary += ` (scarto: ${allScarto.toFixed(2)}kg)`;
-  summary += `\n💶 Capitale speso: *€${totSpesa.toFixed(2)}*`;
+  if (allScarto > 0) summary += ` | Scarto: ${allScarto.toFixed(2)}kg`;
+  summary += `\n💶 Capitale speso: *€${totSpesaAll.toFixed(2)}*`;
   if (totKgRim > 0) summary += ` (solo nuovi acquisti)`;
   summary += `\n💰 Incasso lordo previsto: *€${totIncassoLordo.toFixed(2)}*`;
   if (totIncassoRim > 0) summary += `\n♻️ Valore rimanenze: *€${totIncassoRim.toFixed(2)}*`;
@@ -1739,10 +1748,14 @@ async function buildReport(env, targetDate = null) {
     `_Esclusi: benzine e sigarette (bonus aziendale)_`;
 
   // Future remainders: kg marked in col I of today's purchases (going to next day)
-  const totRimFutureKg = fishDetails.reduce((sum, f) => sum + f.rim, 0);
+  // Value = sellable kg (after waste) × sale price
+  const totRimFutureKg = allFishDetails.reduce((sum, f) => sum + f.rim, 0);
   if (totRimFutureKg > 0) {
-    const totRimFutureValore = fishDetails.reduce((sum, f) => sum + (f.rim * f.pv), 0);
-    summary += `\n\n📦 Rimanenze future: *${totRimFutureKg.toFixed(1)}kg* — valore: *€${totRimFutureValore.toFixed(2)}*`;
+    const totRimFutureValore = allFishDetails.reduce((sum, f) => {
+      const scartoRim = f.rim * f.scartoPerKg;
+      return sum + (Math.max(0, f.rim - scartoRim) * f.pv);
+    }, 0);
+    summary += `\n\n📦 Rimanenze future: *${totRimFutureKg.toFixed(1)}kg* — valore netto: *€${totRimFutureValore.toFixed(2)}*`;
   }
 
   return summary;

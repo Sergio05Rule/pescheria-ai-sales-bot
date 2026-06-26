@@ -5,13 +5,13 @@ AI-powered Telegram bot for fish shop inventory management — natural language 
 ## 🎯 Features
 
 - **Natural Language Input** — speak Italian naturally, AI understands intent and extracts data
-- **Purchase Registration** — auto-deduces category, reuses weather/pescheria from same day
+- **Purchase Registration** — auto-deduces category, reuses weather/pescheria from same day; suppliers: Brezza, Franco, Meridional, Ottavio, Pinuccio, Pupo (extensible via `/aggiungi fornitore`)
 - **Remainder Management** — validates against available stock (FIFO: remainder rows consumed first, then purchases), suggests alternating pescheria; remainders from previous days count as today's inventory
 - **Restaurant Sales** — if remainders have been declared (shop closed), takes from remainder stock first and auto-adjusts the future remainder row + col I; if no remainders yet (shop still open), takes from today's inventory. Supports multi-row FIFO distribution
 - **Excess Requests** — tracks unsatisfied demand, warns if inconsistent with remainders
 - **Updates & Deletes** — conversational corrections or explicit edits, single or bulk deletion
 - **Multi-Action Support** — AI can execute multiple operations in a single message (batch updates, deletes, etc.)
-- **Daily Reports** — flexible reports by date (any date, even future), via `/report` command or natural language; margins account for waste (scarto) on applicable fish
+- **Daily Reports** — restructured by supplier (total spend per supplier + fish list), then remainders section at the end; margins account for waste (scarto) on applicable fish
 - **Smart Validation** — AI checks all data against real sheet state before executing (today + next 20 days context)
 - **Double Message Protection** — concurrency lock in KV: while processing, all incoming messages are dropped with a "⏳" notification
 - **Single-Message Responses** — multi-item operations (purchases, updates, deletes) produce one consolidated message, not one per item
@@ -68,7 +68,7 @@ SHEET_NAME=AIPescheriaBot
 | `executeUpdate()` | Updates any field by PRIMARY KEY (data, pescheria, pesce) |
 | `executeDeletion()` | Deletes single row by PRIMARY KEY |
 | `executeBulkDeletion()` | Bulk delete with mandatory confirmation |
-| `executeReport()` | Generates report for one or more dates (reads sheet in real time, accounts for waste/scarto in margins) |
+| `executeReport()` | Generates report grouped by supplier with totals, then remainders (reads sheet in real time, accounts for waste/scarto in margins) |
 
 ## 📊 Report & Waste Calculation
 
