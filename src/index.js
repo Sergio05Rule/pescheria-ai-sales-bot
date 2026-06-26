@@ -234,18 +234,31 @@ async function handleMessage(chatId, text, env) {
 
   // Execute action based on AI decision
   if (aiResponse.actions) {
-    // Multi-action: execute all silently, send one summary at the end
-    const results = [];
+    // Multi-action: execute all silently, then report based on actual outcome
+    let okCount = 0;
+    const errors = [];
     for (const act of aiResponse.actions) {
       try {
         await executeAction(chatId, act, env, true); // silent mode
-        if (act.message) results.push(act.message);
+        okCount++;
       } catch (e) {
-        results.push(`⚠️ Errore: ${e.message}`);
+        errors.push(`• ${act.message || act.action}: ${e.message}`);
       }
     }
-    const summary = aiResponse.message || results.join('\n');
-    await sendTelegram(chatId, summary, env);
+    if (errors.length === 0) {
+      // All succeeded — safe to show the AI's success summary
+      await sendTelegram(chatId, aiResponse.message || `✅ Fatto (${okCount} operazioni).`, env);
+    } else if (okCount === 0) {
+      // Everything failed — do NOT show a success message
+      await sendTelegram(chatId,
+        `❌ *Nessun dato registrato.* Tutte le operazioni sono fallite:\n\n${errors.join('\n')}\n\nRiprova.`, env);
+    } else {
+      // Partial success — be explicit about what failed
+      await sendTelegram(chatId,
+        `⚠️ *Registrazione parziale*: ${okCount} ok, ${errors.length} fallite.\n\n` +
+        `Operazioni fallite:\n${errors.join('\n')}\n\n` +
+        `Reinvia SOLO le parti fallite.`, env);
+    }
   } else if (aiResponse.action) {
     await executeAction(chatId, aiResponse, env, false);
   } else if (aiResponse.brokenJSON) {
@@ -253,6 +266,13 @@ async function handleMessage(chatId, text, env) {
     await sendTelegram(chatId,
       `⚠️ Ho avuto un problema tecnico nell'elaborare la richiesta e ` +
       `*nessun dato è stato registrato*.\n\nRiprova a inviare il messaggio.`, env);
+  } else if (looksLikeFakeConfirmation(aiResponse.text)) {
+    // AI described a registration in prose without returning an action:
+    // nothing was actually written. Warn instead of showing the false confirmation.
+    await sendTelegram(chatId,
+      `⚠️ *Attenzione: nessun dato è stato registrato.*\n\n` +
+      `Il sistema non ha elaborato correttamente la richiesta. ` +
+      `Reinvia il messaggio, possibilmente diviso in parti più piccole (es. un fornitore alla volta).`, env);
   } else {
     await sendTelegram(chatId, aiResponse.text, env);
   }
@@ -438,6 +458,7 @@ RULES:
 - Conversational corrections = just text response, NO action
 - PRIMARY KEY = (data, pescheria, pesce) for updates/deletions
 - Never create duplicate rows for corrections
+- CRITICAL: NEVER confirm a registration/update/deletion in plain text. The CODE writes data and sends confirmations, NOT you. If you intend to register/update/delete ANYTHING, you MUST return the JSON action. Writing "✅ Registrato!", "Ho caricato gli acquisti", item lists, or "Totale: Xkg" as plain text WITHOUT the JSON action is FORBIDDEN — it makes the user believe data was saved when nothing was written. When in doubt, return the JSON action, never a textual summary of work.
 
 RESPONSE FORMAT — return JSON when ALL data ready:
 For ACQUISTO: {"action":"acquisto","data":{"items":[{"specie":"Cozze","kg":20,"prezzo_acquisto":2,"prezzo_vendita":10,"pescheria":"Grassano","fornitore":"Brezza","meteo":"Sole","categoria":"Allevamento","data_acquisto":"${oggiStr}","note":""}]},"message":"✅ Registrato!"}
@@ -1419,6 +1440,19 @@ function looksLikeBrokenJSON(text) {
   const t = (text || '').trim();
   if (!t.startsWith('{')) return false;
   return /"?action"?\s*:/.test(t) || /"?actions"?\s*:/.test(t);
+}
+
+// Heuristic: plain text that pretends to confirm a registration without any
+// JSON action. The model "hallucinated" doing the work. We detect a success
+// marker plus multiple item-like lines (kg + €) so we don't false-positive on
+// short conversational corrections like "✅ Corretto! Userò Pioggia".
+function looksLikeFakeConfirmation(text) {
+  const t = text || '';
+  const hasSuccessMarker = /✅|registrat|caricat|aggiornat|salvat|inserit/i.test(t);
+  if (!hasSuccessMarker) return false;
+  const itemLines = (t.match(/\d+([.,]\d+)?\s*kg/gi) || []).length;
+  const hasEuro = /€|euro/i.test(t);
+  return itemLines >= 2 && hasEuro;
 }
 
 async function parseFlexibleDate(dateText, env) {
