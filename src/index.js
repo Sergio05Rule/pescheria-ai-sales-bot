@@ -214,6 +214,15 @@ async function handleMessage(chatId, text, env) {
   } catch (e) {
     session.messages.pop(); // Remove failed user message from history
     await saveSession(chatId, session, env);
+    // Truncated-output case: give the user a clear, actionable message
+    if (e.message.startsWith('TROPPI_ARTICOLI:')) {
+      await sendTelegram(chatId,
+        `⚠️ *Messaggio troppo grande*\n\n` +
+        `Il messaggio contiene troppi articoli da elaborare in una volta sola e ` +
+        `*nessun dato è stato registrato*.\n\n` +
+        `✂️ Dividilo in più parti (es. un fornitore alla volta) e reinvialo.`, env);
+      return;
+    }
     await sendTelegram(chatId, `⚠️ Errore AI: ${e.message}\n\nRiprova.`, env);
     return;
   }
@@ -239,6 +248,11 @@ async function handleMessage(chatId, text, env) {
     await sendTelegram(chatId, summary, env);
   } else if (aiResponse.action) {
     await executeAction(chatId, aiResponse, env, false);
+  } else if (aiResponse.brokenJSON) {
+    // AI tried to return an action but produced invalid JSON: don't echo it.
+    await sendTelegram(chatId,
+      `⚠️ Ho avuto un problema tecnico nell'elaborare la richiesta e ` +
+      `*nessun dato è stato registrato*.\n\nRiprova a inviare il messaggio.`, env);
   } else {
     await sendTelegram(chatId, aiResponse.text, env);
   }
@@ -452,7 +466,7 @@ If need more info → respond with text only (no JSON).`;
     },
     body: JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 2048,
+      max_tokens: 4096,
       system: [
         { type: 'text', text: staticPrompt, cache_control: { type: 'ephemeral' } },
         { type: 'text', text: dynamicContext }
@@ -465,6 +479,16 @@ If need more info → respond with text only (no JSON).`;
   const data = await res.json();
   const rawText = data.content[0].text;
 
+  // Detect truncated output: Claude hit the token ceiling mid-response.
+  // This happens with too many items in one message — the JSON is cut off
+  // and would fail to parse, leaving the user unsure if anything was saved.
+  if (data.stop_reason === 'max_tokens') {
+    throw new Error(
+      'TROPPI_ARTICOLI: il messaggio contiene troppi articoli da elaborare in una volta. ' +
+      'Nessun dato è stato registrato. Dividi il messaggio in più parti (es. un fornitore alla volta) e riprova.'
+    );
+  }
+
   // Try to parse JSON response
   const parsed = extractJSON(rawText);
   if (parsed?.actions && Array.isArray(parsed.actions)) {
@@ -473,6 +497,12 @@ If need more info → respond with text only (no JSON).`;
   }
   if (parsed?.action) {
     return { action: parsed.action, data: parsed.data, message: parsed.message, rawText };
+  }
+
+  // JSON-like output that failed to parse even after repair: warn instead of
+  // echoing raw JSON to the user (which could look like a false confirmation)
+  if (looksLikeBrokenJSON(rawText)) {
+    return { action: null, brokenJSON: true, rawText };
   }
   
   // Plain text response
@@ -1351,19 +1381,44 @@ function getWastePerKg(nomePesce) {
 
 function extractJSON(text) {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenced) { try { return JSON.parse(fenced[1].trim()); } catch {} }
+  if (fenced) {
+    const repaired = tryParseWithRepair(fenced[1].trim());
+    if (repaired !== undefined) return repaired;
+  }
   let depth = 0, start = -1;
   for (let i = 0; i < text.length; i++) {
     if (text[i] === '{') { if (depth === 0) start = i; depth++; }
     else if (text[i] === '}') {
       depth--;
       if (depth === 0 && start !== -1) {
-        try { return JSON.parse(text.slice(start, i + 1)); } catch {}
+        const repaired = tryParseWithRepair(text.slice(start, i + 1));
+        if (repaired !== undefined) return repaired;
         start = -1;
       }
     }
   }
   return null;
+}
+
+// Attempt to parse a JSON string, repairing common LLM defects on failure.
+// Returns the parsed object, or undefined if it cannot be parsed even after repair.
+function tryParseWithRepair(raw) {
+  try { return JSON.parse(raw); } catch {}
+  // Repair pass: remove trailing commas before } or ], normalize smart quotes
+  let repaired = raw
+    .replace(/,\s*([}\]])/g, '$1')   // trailing commas: {..,} or [..,]
+    .replace(/[\u201C\u201D]/g, '"')  // smart double quotes → "
+    .replace(/[\u2018\u2019]/g, "'"); // smart single quotes → '
+  try { return JSON.parse(repaired); } catch {}
+  return undefined;
+}
+
+// Heuristic: does this text look like it was MEANT to be a JSON action,
+// but failed to parse? Used to warn the user instead of echoing raw JSON.
+function looksLikeBrokenJSON(text) {
+  const t = (text || '').trim();
+  if (!t.startsWith('{')) return false;
+  return /"?action"?\s*:/.test(t) || /"?actions"?\s*:/.test(t);
 }
 
 async function parseFlexibleDate(dateText, env) {

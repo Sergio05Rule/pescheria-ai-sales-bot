@@ -15,6 +15,7 @@ AI-powered Telegram bot for fish shop inventory management — natural language 
 - **Smart Validation** — AI checks all data against real sheet state before executing (today + next 20 days context)
 - **Double Message Protection** — concurrency lock in KV: while processing, all incoming messages are dropped with a "⏳" notification
 - **Single-Message Responses** — multi-item operations (purchases, updates, deletes) produce one consolidated message, not one per item
+- **Oversized Message Guard** — if a message has too many items for the AI to process in one response (output hits the token ceiling), the bot detects the truncation and tells the user clearly that *nothing was saved* — split and retry. No silent failures.
 - **Daily Session Reset** — conversation history resets each day, AI re-reads sheet fresh on first interaction
 - **Real-Time Writes** — all operations write directly to Google Sheets, no batching or queuing
 - **Cost Efficient** — ~$1/month with Claude Haiku 4.5, further reduced by prompt caching
@@ -136,6 +137,18 @@ Cloudflare Workers, Google Sheets API, and Telegram Bot API are all free tier.
 11. **Prompt caching saves tokens** — static system prompt (rules, actions, formats) is cached for 5 minutes via Anthropic's prompt caching; only the dynamic sheet context is sent fresh each call. During active sessions (multiple messages within 5 min), cached input tokens cost 90% less
 12. **Never compare DD/MM/YYYY strings lexicographically** — `"10/3/2026" > "3/3/2026"` is `false` because `"1" < "3"`. Always parse to `Date` objects first. This bug silently broke future remainder detection for dates with day or month ≥ 10
 13. **FIFO distribution is mechanical, not decisional** — the AI validates availability and decides the action; executor functions handle the mechanical distribution across multiple rows. This is acceptable "plumbing logic" in dumb executors, not business logic
+14. **Detect truncation, don't guess** — when the AI's JSON output is cut off by the token ceiling (`stop_reason === 'max_tokens'`), parsing it would silently fail and leave the user unsure if data was saved. Detecting the truncation explicitly and telling the user "nothing was saved, split the message" is more honest than a partial write. `max_tokens` is set to 4096 to comfortably fit large multi-item purchases
+15. **Repair JSON, never echo it raw** — LLMs occasionally emit JSON with trailing commas or curly quotes. `extractJSON` runs a repair pass (strip trailing commas, normalize smart quotes) before parsing. If a response still looks like a JSON action but won't parse, the user gets a clear "technical problem, nothing saved, retry" message — never the raw JSON, which could be mistaken for a confirmation
+
+## ⚠️ Known Limitations
+
+These are known constraints to be aware of when operating or extending the bot:
+
+1. **Sheet row exhaustion → Sheets API 400** — writes use a `PUT` to the first empty row detected in column A. Google Sheets caps a new sheet at ~1000 rows by default. When the sheet fills up, the `PUT` targets a non-existent row and the API returns `400`, so the registration fails. **Workaround**: manually add more rows to the sheet (right-click last row → insert rows below). **Proper fix (planned)**: switch from `PUT` to the Sheets `append` endpoint, which grows the sheet automatically.
+
+2. **Italian locale formulas** — generated formula columns (O–AB) use Italian function names (`SE`, `CONCATENA`, `TESTO`). These only evaluate correctly if the Google Sheet's locale is set to Italian. If the sheet locale is English (or another language), the formulas break with `#NAME?`. Keep the sheet locale set to **Italiano (Italia)**.
+
+3. **Malformed JSON is repaired or flagged** — the AI's response is parsed as JSON to decide the action. Common LLM defects (trailing commas `{...,}`, smart/curly quotes) are now auto-repaired before parsing. If a JSON-looking response *still* fails to parse, the bot detects it and tells the user "technical problem, nothing was saved, retry" instead of echoing raw JSON that could look like a false confirmation. Truly unparseable cases are rare with Haiku 4.5.
 
 ## 🔮 Next Steps
 
