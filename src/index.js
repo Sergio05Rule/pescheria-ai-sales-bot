@@ -606,8 +606,8 @@ async function executePurchase(chatId, data, message, env, silent = false) {
   }
 
   if (!silent) {
-    // Message 1: confirmation + item summary
-    await sendTelegram(chatId, `✅ ${message}\n\n${formatSummary(items)}`, env);
+    // Message 1: minimal confirmation grouped by supplier (spend, unique fish, total kg)
+    await sendTelegram(chatId, buildPurchaseSummary(items), env);
     // Message 2: daily report (always sent separately)
     try {
       const report = await buildReport(env);
@@ -616,6 +616,33 @@ async function executePurchase(chatId, data, message, env, silent = false) {
       console.error('Report error:', e);
     }
   }
+}
+
+// Minimal purchase confirmation: per-supplier spend, unique fish count, total kg.
+function buildPurchaseSummary(items) {
+  const bySupplier = {};
+  let grandKg = 0, grandSpesa = 0;
+
+  items.forEach(i => {
+    const f = i.fornitore || 'Sconosciuto';
+    const kg = parseNum(i.kg);
+    const spesa = kg * parseNum(i.prezzo_acquisto);
+    if (!bySupplier[f]) bySupplier[f] = { spesa: 0, kg: 0, species: new Set() };
+    bySupplier[f].spesa += spesa;
+    bySupplier[f].kg += kg;
+    bySupplier[f].species.add((i.specie || '').toLowerCase());
+    grandKg += kg;
+    grandSpesa += spesa;
+  });
+
+  const lines = Object.entries(bySupplier).map(([f, d]) =>
+    `🏪 *${f}*\n` +
+    `   Spesa: €${d.spesa.toFixed(2)} | ${d.species.size} tipi | ${d.kg.toFixed(1)}kg`
+  );
+
+  return `✅ *Acquisti registrati*\n\n` +
+    lines.join('\n') +
+    `\n\n💶 Totale spesa: *€${grandSpesa.toFixed(2)}* | ${grandKg.toFixed(1)}kg`;
 }
 
 async function executeRemainders(chatId, data, message, env, silent = false) {
@@ -1885,15 +1912,6 @@ async function loadCustomLists(env) {
       Object.assign(FISH_CATEGORY, v);
     }
   } catch {}
-}
-
-function formatSummary(items) {
-  return items.map(i => {
-    const margine = ((i.prezzo_vendita - i.prezzo_acquisto) * i.kg).toFixed(2);
-    return `🐟 *${i.specie}* (${i.categoria})\n` +
-      `   ${i.kg}kg | acq €${i.prezzo_acquisto}/kg → vend €${i.prezzo_vendita}/kg\n` +
-      `   Margine: *€${margine}* | ${i.fornitore} → ${i.pescheria} | ${i.meteo}`;
-  }).join('\n\n');
 }
 
 // ══════════════════════════════════════════════════════════════
